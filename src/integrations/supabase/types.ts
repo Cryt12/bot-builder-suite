@@ -147,6 +147,7 @@ export type Database = {
           embedding: string | null
           id: string
           source_id: string
+          tsv: unknown
           user_id: string
         }
         Insert: {
@@ -157,6 +158,7 @@ export type Database = {
           embedding?: string | null
           id?: string
           source_id: string
+          tsv?: unknown
           user_id: string
         }
         Update: {
@@ -167,6 +169,7 @@ export type Database = {
           embedding?: string | null
           id?: string
           source_id?: string
+          tsv?: unknown
           user_id?: string
         }
         Relationships: [
@@ -335,6 +338,18 @@ export type Database = {
           content: string
           id: string
           similarity: number
+        }[]
+      }
+      search_chunks: {
+        Args: {
+          match_chatbot_id: string
+          match_count?: number
+          query_text: string
+        }
+        Returns: {
+          content: string
+          id: string
+          rank: number
         }[]
       }
     }

@@ -1,31 +1,11 @@
 // Lovable AI gateway helpers (server-only)
 const GATEWAY = "https://ai.gateway.lovable.dev/v1";
 
-export async function embedTexts(texts: string[]): Promise<number[][]> {
-  const key = process.env.LOVABLE_API_KEY;
-  if (!key) throw new Error("LOVABLE_API_KEY missing");
-
-  // Gemini embedding: text-embedding-004 (768 dims). The gateway exposes it as google/text-embedding-004.
-  const res = await fetch(`${GATEWAY}/embeddings`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "google/text-embedding-004",
-      input: texts,
-    }),
-  });
-  if (!res.ok) {
-    const t = await res.text();
-    throw new Error(`Embeddings failed [${res.status}]: ${t}`);
-  }
-  const data: any = await res.json();
-  return data.data.map((d: any) => d.embedding);
-}
-
 export async function chatComplete(args: {
   system: string;
   messages: { role: "user" | "assistant"; content: string }[];
   stream?: boolean;
+  model?: string;
 }): Promise<Response> {
   const key = process.env.LOVABLE_API_KEY;
   if (!key) throw new Error("LOVABLE_API_KEY missing");
@@ -34,9 +14,25 @@ export async function chatComplete(args: {
     method: "POST",
     headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: "google/gemini-3-flash-preview",
+      model: args.model ?? "google/gemini-3-flash-preview",
       messages: [{ role: "system", content: args.system }, ...args.messages],
       stream: args.stream ?? false,
     }),
   });
+}
+
+export async function chatJSON(args: {
+  system: string;
+  user: string;
+}): Promise<string> {
+  const res = await chatComplete({
+    system: args.system,
+    messages: [{ role: "user", content: args.user }],
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`Chat failed [${res.status}]: ${t}`);
+  }
+  const data: any = await res.json();
+  return data.choices?.[0]?.message?.content ?? "";
 }
