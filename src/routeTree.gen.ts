@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as AuthRouteImport } from './routes/auth'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as DashboardIndexRouteImport } from './routes/dashboard.index'
 import { Route as ApiPublicWidgetDotjsRouteImport } from './routes/api.public.widget[.]js'
 import { Route as ApiPublicChatRouteImport } from './routes/api.public.chat'
 import { Route as ApiPublicBotApiKeyRouteImport } from './routes/api.public.bot.$apiKey'
@@ -30,6 +31,11 @@ const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
+} as any)
+const DashboardIndexRoute = DashboardIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => DashboardRoute,
 } as any)
 const ApiPublicWidgetDotjsRoute = ApiPublicWidgetDotjsRouteImport.update({
   id: '/api/public/widget.js',
@@ -50,7 +56,8 @@ const ApiPublicBotApiKeyRoute = ApiPublicBotApiKeyRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
-  '/dashboard': typeof DashboardRoute
+  '/dashboard': typeof DashboardRouteWithChildren
+  '/dashboard/': typeof DashboardIndexRoute
   '/api/public/chat': typeof ApiPublicChatRoute
   '/api/public/widget.js': typeof ApiPublicWidgetDotjsRoute
   '/api/public/bot/$apiKey': typeof ApiPublicBotApiKeyRoute
@@ -58,7 +65,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
-  '/dashboard': typeof DashboardRoute
+  '/dashboard': typeof DashboardIndexRoute
   '/api/public/chat': typeof ApiPublicChatRoute
   '/api/public/widget.js': typeof ApiPublicWidgetDotjsRoute
   '/api/public/bot/$apiKey': typeof ApiPublicBotApiKeyRoute
@@ -67,7 +74,8 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
-  '/dashboard': typeof DashboardRoute
+  '/dashboard': typeof DashboardRouteWithChildren
+  '/dashboard/': typeof DashboardIndexRoute
   '/api/public/chat': typeof ApiPublicChatRoute
   '/api/public/widget.js': typeof ApiPublicWidgetDotjsRoute
   '/api/public/bot/$apiKey': typeof ApiPublicBotApiKeyRoute
@@ -78,6 +86,7 @@ export interface FileRouteTypes {
     | '/'
     | '/auth'
     | '/dashboard'
+    | '/dashboard/'
     | '/api/public/chat'
     | '/api/public/widget.js'
     | '/api/public/bot/$apiKey'
@@ -94,6 +103,7 @@ export interface FileRouteTypes {
     | '/'
     | '/auth'
     | '/dashboard'
+    | '/dashboard/'
     | '/api/public/chat'
     | '/api/public/widget.js'
     | '/api/public/bot/$apiKey'
@@ -102,7 +112,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AuthRoute: typeof AuthRoute
-  DashboardRoute: typeof DashboardRoute
+  DashboardRoute: typeof DashboardRouteWithChildren
   ApiPublicChatRoute: typeof ApiPublicChatRoute
   ApiPublicWidgetDotjsRoute: typeof ApiPublicWidgetDotjsRoute
   ApiPublicBotApiKeyRoute: typeof ApiPublicBotApiKeyRoute
@@ -131,6 +141,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/dashboard/': {
+      id: '/dashboard/'
+      path: '/'
+      fullPath: '/dashboard/'
+      preLoaderRoute: typeof DashboardIndexRouteImport
+      parentRoute: typeof DashboardRoute
+    }
     '/api/public/widget.js': {
       id: '/api/public/widget.js'
       path: '/api/public/widget.js'
@@ -155,10 +172,22 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface DashboardRouteChildren {
+  DashboardIndexRoute: typeof DashboardIndexRoute
+}
+
+const DashboardRouteChildren: DashboardRouteChildren = {
+  DashboardIndexRoute: DashboardIndexRoute,
+}
+
+const DashboardRouteWithChildren = DashboardRoute._addFileChildren(
+  DashboardRouteChildren,
+)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AuthRoute: AuthRoute,
-  DashboardRoute: DashboardRoute,
+  DashboardRoute: DashboardRouteWithChildren,
   ApiPublicChatRoute: ApiPublicChatRoute,
   ApiPublicWidgetDotjsRoute: ApiPublicWidgetDotjsRoute,
   ApiPublicBotApiKeyRoute: ApiPublicBotApiKeyRoute,
