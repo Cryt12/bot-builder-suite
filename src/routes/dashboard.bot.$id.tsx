@@ -249,7 +249,7 @@ function PlaygroundTab({ bot }: { bot: any }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           apiKey: bot.api_key, message: msg, conversationId: convId,
-          history: messages.slice(-10).filter((m) => m.role !== "system"),
+          history: messages.slice(-10),
         }),
       });
       const j = await r.json();
