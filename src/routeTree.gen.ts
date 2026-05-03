@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as AuthRouteImport } from './routes/auth'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ApiPublicWidgetDotjsRouteImport } from './routes/api.public.widget[.]js'
 import { Route as ApiPublicChatRouteImport } from './routes/api.public.chat'
 import { Route as ApiPublicBotApiKeyRouteImport } from './routes/api.public.bot.$apiKey'
 
@@ -30,6 +31,11 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiPublicWidgetDotjsRoute = ApiPublicWidgetDotjsRouteImport.update({
+  id: '/api/public/widget.js',
+  path: '/api/public/widget.js',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiPublicChatRoute = ApiPublicChatRouteImport.update({
   id: '/api/public/chat',
   path: '/api/public/chat',
@@ -46,6 +52,7 @@ export interface FileRoutesByFullPath {
   '/auth': typeof AuthRoute
   '/dashboard': typeof DashboardRoute
   '/api/public/chat': typeof ApiPublicChatRoute
+  '/api/public/widget.js': typeof ApiPublicWidgetDotjsRoute
   '/api/public/bot/$apiKey': typeof ApiPublicBotApiKeyRoute
 }
 export interface FileRoutesByTo {
@@ -53,6 +60,7 @@ export interface FileRoutesByTo {
   '/auth': typeof AuthRoute
   '/dashboard': typeof DashboardRoute
   '/api/public/chat': typeof ApiPublicChatRoute
+  '/api/public/widget.js': typeof ApiPublicWidgetDotjsRoute
   '/api/public/bot/$apiKey': typeof ApiPublicBotApiKeyRoute
 }
 export interface FileRoutesById {
@@ -61,6 +69,7 @@ export interface FileRoutesById {
   '/auth': typeof AuthRoute
   '/dashboard': typeof DashboardRoute
   '/api/public/chat': typeof ApiPublicChatRoute
+  '/api/public/widget.js': typeof ApiPublicWidgetDotjsRoute
   '/api/public/bot/$apiKey': typeof ApiPublicBotApiKeyRoute
 }
 export interface FileRouteTypes {
@@ -70,6 +79,7 @@ export interface FileRouteTypes {
     | '/auth'
     | '/dashboard'
     | '/api/public/chat'
+    | '/api/public/widget.js'
     | '/api/public/bot/$apiKey'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -77,6 +87,7 @@ export interface FileRouteTypes {
     | '/auth'
     | '/dashboard'
     | '/api/public/chat'
+    | '/api/public/widget.js'
     | '/api/public/bot/$apiKey'
   id:
     | '__root__'
@@ -84,6 +95,7 @@ export interface FileRouteTypes {
     | '/auth'
     | '/dashboard'
     | '/api/public/chat'
+    | '/api/public/widget.js'
     | '/api/public/bot/$apiKey'
   fileRoutesById: FileRoutesById
 }
@@ -92,6 +104,7 @@ export interface RootRouteChildren {
   AuthRoute: typeof AuthRoute
   DashboardRoute: typeof DashboardRoute
   ApiPublicChatRoute: typeof ApiPublicChatRoute
+  ApiPublicWidgetDotjsRoute: typeof ApiPublicWidgetDotjsRoute
   ApiPublicBotApiKeyRoute: typeof ApiPublicBotApiKeyRoute
 }
 
@@ -118,6 +131,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/public/widget.js': {
+      id: '/api/public/widget.js'
+      path: '/api/public/widget.js'
+      fullPath: '/api/public/widget.js'
+      preLoaderRoute: typeof ApiPublicWidgetDotjsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/api/public/chat': {
       id: '/api/public/chat'
       path: '/api/public/chat'
@@ -140,6 +160,7 @@ const rootRouteChildren: RootRouteChildren = {
   AuthRoute: AuthRoute,
   DashboardRoute: DashboardRoute,
   ApiPublicChatRoute: ApiPublicChatRoute,
+  ApiPublicWidgetDotjsRoute: ApiPublicWidgetDotjsRoute,
   ApiPublicBotApiKeyRoute: ApiPublicBotApiKeyRoute,
 }
 export const routeTree = rootRouteImport

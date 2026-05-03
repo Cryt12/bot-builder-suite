@@ -147,7 +147,7 @@ function buildWidget(origin: string): string {
 })();`;
 }
 
-export const Route = createFileRoute("/api/public/widget/js")({
+export const Route = createFileRoute("/api/public/widget.js")({
   server: {
     handlers: {
       GET: async ({ request }) => {
