@@ -13,6 +13,14 @@ import { Route as DashboardRouteImport } from './routes/dashboard'
 import { Route as AuthRouteImport } from './routes/auth'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as DashboardIndexRouteImport } from './routes/dashboard.index'
+import { Route as DashboardSettingsRouteImport } from './routes/dashboard.settings'
+import { Route as DashboardNotificationsRouteImport } from './routes/dashboard.notifications'
+import { Route as DashboardLeadsRouteImport } from './routes/dashboard.leads'
+import { Route as DashboardKnowledgeRouteImport } from './routes/dashboard.knowledge'
+import { Route as DashboardIntegrationsRouteImport } from './routes/dashboard.integrations'
+import { Route as DashboardFeedbackRouteImport } from './routes/dashboard.feedback'
+import { Route as DashboardChatbotsRouteImport } from './routes/dashboard.chatbots'
+import { Route as DashboardAnalyticsRouteImport } from './routes/dashboard.analytics'
 import { Route as DashboardBotIdRouteImport } from './routes/dashboard.bot.$id'
 import { Route as ApiPublicWidgetDotjsRouteImport } from './routes/api.public.widget[.]js'
 import { Route as ApiPublicChatRouteImport } from './routes/api.public.chat'
@@ -36,6 +44,46 @@ const IndexRoute = IndexRouteImport.update({
 const DashboardIndexRoute = DashboardIndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => DashboardRoute,
+} as any)
+const DashboardSettingsRoute = DashboardSettingsRouteImport.update({
+  id: '/settings',
+  path: '/settings',
+  getParentRoute: () => DashboardRoute,
+} as any)
+const DashboardNotificationsRoute = DashboardNotificationsRouteImport.update({
+  id: '/notifications',
+  path: '/notifications',
+  getParentRoute: () => DashboardRoute,
+} as any)
+const DashboardLeadsRoute = DashboardLeadsRouteImport.update({
+  id: '/leads',
+  path: '/leads',
+  getParentRoute: () => DashboardRoute,
+} as any)
+const DashboardKnowledgeRoute = DashboardKnowledgeRouteImport.update({
+  id: '/knowledge',
+  path: '/knowledge',
+  getParentRoute: () => DashboardRoute,
+} as any)
+const DashboardIntegrationsRoute = DashboardIntegrationsRouteImport.update({
+  id: '/integrations',
+  path: '/integrations',
+  getParentRoute: () => DashboardRoute,
+} as any)
+const DashboardFeedbackRoute = DashboardFeedbackRouteImport.update({
+  id: '/feedback',
+  path: '/feedback',
+  getParentRoute: () => DashboardRoute,
+} as any)
+const DashboardChatbotsRoute = DashboardChatbotsRouteImport.update({
+  id: '/chatbots',
+  path: '/chatbots',
+  getParentRoute: () => DashboardRoute,
+} as any)
+const DashboardAnalyticsRoute = DashboardAnalyticsRouteImport.update({
+  id: '/analytics',
+  path: '/analytics',
   getParentRoute: () => DashboardRoute,
 } as any)
 const DashboardBotIdRoute = DashboardBotIdRouteImport.update({
@@ -63,6 +111,14 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
   '/dashboard': typeof DashboardRouteWithChildren
+  '/dashboard/analytics': typeof DashboardAnalyticsRoute
+  '/dashboard/chatbots': typeof DashboardChatbotsRoute
+  '/dashboard/feedback': typeof DashboardFeedbackRoute
+  '/dashboard/integrations': typeof DashboardIntegrationsRoute
+  '/dashboard/knowledge': typeof DashboardKnowledgeRoute
+  '/dashboard/leads': typeof DashboardLeadsRoute
+  '/dashboard/notifications': typeof DashboardNotificationsRoute
+  '/dashboard/settings': typeof DashboardSettingsRoute
   '/dashboard/': typeof DashboardIndexRoute
   '/api/public/chat': typeof ApiPublicChatRoute
   '/api/public/widget.js': typeof ApiPublicWidgetDotjsRoute
@@ -72,6 +128,14 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
+  '/dashboard/analytics': typeof DashboardAnalyticsRoute
+  '/dashboard/chatbots': typeof DashboardChatbotsRoute
+  '/dashboard/feedback': typeof DashboardFeedbackRoute
+  '/dashboard/integrations': typeof DashboardIntegrationsRoute
+  '/dashboard/knowledge': typeof DashboardKnowledgeRoute
+  '/dashboard/leads': typeof DashboardLeadsRoute
+  '/dashboard/notifications': typeof DashboardNotificationsRoute
+  '/dashboard/settings': typeof DashboardSettingsRoute
   '/dashboard': typeof DashboardIndexRoute
   '/api/public/chat': typeof ApiPublicChatRoute
   '/api/public/widget.js': typeof ApiPublicWidgetDotjsRoute
@@ -83,6 +147,14 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
   '/dashboard': typeof DashboardRouteWithChildren
+  '/dashboard/analytics': typeof DashboardAnalyticsRoute
+  '/dashboard/chatbots': typeof DashboardChatbotsRoute
+  '/dashboard/feedback': typeof DashboardFeedbackRoute
+  '/dashboard/integrations': typeof DashboardIntegrationsRoute
+  '/dashboard/knowledge': typeof DashboardKnowledgeRoute
+  '/dashboard/leads': typeof DashboardLeadsRoute
+  '/dashboard/notifications': typeof DashboardNotificationsRoute
+  '/dashboard/settings': typeof DashboardSettingsRoute
   '/dashboard/': typeof DashboardIndexRoute
   '/api/public/chat': typeof ApiPublicChatRoute
   '/api/public/widget.js': typeof ApiPublicWidgetDotjsRoute
@@ -95,6 +167,14 @@ export interface FileRouteTypes {
     | '/'
     | '/auth'
     | '/dashboard'
+    | '/dashboard/analytics'
+    | '/dashboard/chatbots'
+    | '/dashboard/feedback'
+    | '/dashboard/integrations'
+    | '/dashboard/knowledge'
+    | '/dashboard/leads'
+    | '/dashboard/notifications'
+    | '/dashboard/settings'
     | '/dashboard/'
     | '/api/public/chat'
     | '/api/public/widget.js'
@@ -104,6 +184,14 @@ export interface FileRouteTypes {
   to:
     | '/'
     | '/auth'
+    | '/dashboard/analytics'
+    | '/dashboard/chatbots'
+    | '/dashboard/feedback'
+    | '/dashboard/integrations'
+    | '/dashboard/knowledge'
+    | '/dashboard/leads'
+    | '/dashboard/notifications'
+    | '/dashboard/settings'
     | '/dashboard'
     | '/api/public/chat'
     | '/api/public/widget.js'
@@ -114,6 +202,14 @@ export interface FileRouteTypes {
     | '/'
     | '/auth'
     | '/dashboard'
+    | '/dashboard/analytics'
+    | '/dashboard/chatbots'
+    | '/dashboard/feedback'
+    | '/dashboard/integrations'
+    | '/dashboard/knowledge'
+    | '/dashboard/leads'
+    | '/dashboard/notifications'
+    | '/dashboard/settings'
     | '/dashboard/'
     | '/api/public/chat'
     | '/api/public/widget.js'
@@ -160,6 +256,62 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DashboardIndexRouteImport
       parentRoute: typeof DashboardRoute
     }
+    '/dashboard/settings': {
+      id: '/dashboard/settings'
+      path: '/settings'
+      fullPath: '/dashboard/settings'
+      preLoaderRoute: typeof DashboardSettingsRouteImport
+      parentRoute: typeof DashboardRoute
+    }
+    '/dashboard/notifications': {
+      id: '/dashboard/notifications'
+      path: '/notifications'
+      fullPath: '/dashboard/notifications'
+      preLoaderRoute: typeof DashboardNotificationsRouteImport
+      parentRoute: typeof DashboardRoute
+    }
+    '/dashboard/leads': {
+      id: '/dashboard/leads'
+      path: '/leads'
+      fullPath: '/dashboard/leads'
+      preLoaderRoute: typeof DashboardLeadsRouteImport
+      parentRoute: typeof DashboardRoute
+    }
+    '/dashboard/knowledge': {
+      id: '/dashboard/knowledge'
+      path: '/knowledge'
+      fullPath: '/dashboard/knowledge'
+      preLoaderRoute: typeof DashboardKnowledgeRouteImport
+      parentRoute: typeof DashboardRoute
+    }
+    '/dashboard/integrations': {
+      id: '/dashboard/integrations'
+      path: '/integrations'
+      fullPath: '/dashboard/integrations'
+      preLoaderRoute: typeof DashboardIntegrationsRouteImport
+      parentRoute: typeof DashboardRoute
+    }
+    '/dashboard/feedback': {
+      id: '/dashboard/feedback'
+      path: '/feedback'
+      fullPath: '/dashboard/feedback'
+      preLoaderRoute: typeof DashboardFeedbackRouteImport
+      parentRoute: typeof DashboardRoute
+    }
+    '/dashboard/chatbots': {
+      id: '/dashboard/chatbots'
+      path: '/chatbots'
+      fullPath: '/dashboard/chatbots'
+      preLoaderRoute: typeof DashboardChatbotsRouteImport
+      parentRoute: typeof DashboardRoute
+    }
+    '/dashboard/analytics': {
+      id: '/dashboard/analytics'
+      path: '/analytics'
+      fullPath: '/dashboard/analytics'
+      preLoaderRoute: typeof DashboardAnalyticsRouteImport
+      parentRoute: typeof DashboardRoute
+    }
     '/dashboard/bot/$id': {
       id: '/dashboard/bot/$id'
       path: '/bot/$id'
@@ -192,11 +344,27 @@ declare module '@tanstack/react-router' {
 }
 
 interface DashboardRouteChildren {
+  DashboardAnalyticsRoute: typeof DashboardAnalyticsRoute
+  DashboardChatbotsRoute: typeof DashboardChatbotsRoute
+  DashboardFeedbackRoute: typeof DashboardFeedbackRoute
+  DashboardIntegrationsRoute: typeof DashboardIntegrationsRoute
+  DashboardKnowledgeRoute: typeof DashboardKnowledgeRoute
+  DashboardLeadsRoute: typeof DashboardLeadsRoute
+  DashboardNotificationsRoute: typeof DashboardNotificationsRoute
+  DashboardSettingsRoute: typeof DashboardSettingsRoute
   DashboardIndexRoute: typeof DashboardIndexRoute
   DashboardBotIdRoute: typeof DashboardBotIdRoute
 }
 
 const DashboardRouteChildren: DashboardRouteChildren = {
+  DashboardAnalyticsRoute: DashboardAnalyticsRoute,
+  DashboardChatbotsRoute: DashboardChatbotsRoute,
+  DashboardFeedbackRoute: DashboardFeedbackRoute,
+  DashboardIntegrationsRoute: DashboardIntegrationsRoute,
+  DashboardKnowledgeRoute: DashboardKnowledgeRoute,
+  DashboardLeadsRoute: DashboardLeadsRoute,
+  DashboardNotificationsRoute: DashboardNotificationsRoute,
+  DashboardSettingsRoute: DashboardSettingsRoute,
   DashboardIndexRoute: DashboardIndexRoute,
   DashboardBotIdRoute: DashboardBotIdRoute,
 }
