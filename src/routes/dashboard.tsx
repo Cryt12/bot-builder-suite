@@ -52,7 +52,7 @@ function DashboardLayout() {
             </span>
             {!collapsed && (
               <span className="bg-gradient-to-r from-primary to-primary-glow bg-clip-text text-transparent tracking-wide">
-                TUQLAS
+                Helix
               </span>
             )}
           </Link>
