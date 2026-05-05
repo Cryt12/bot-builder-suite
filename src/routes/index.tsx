@@ -194,6 +194,7 @@ function Landing() {
       </section>
 
       {/* CTA */}
+      <span id="stack" className="block scroll-mt-24" />
       <section className="mx-auto max-w-7xl px-6 py-24">
         <div className="rounded-3xl border border-border-strong bg-gradient-card p-12 md:p-16 text-center relative overflow-hidden">
           <div className="absolute inset-0 bg-gradient-hero opacity-60" />
