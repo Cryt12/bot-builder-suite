@@ -136,7 +136,7 @@ function Landing() {
       </section>
 
       {/* Features */}
-      <section id="features" className="mx-auto max-w-7xl px-6 py-24">
+      <section id="features" className="scroll-mt-24 mx-auto max-w-7xl px-6 py-24">
         <div className="text-center max-w-2xl mx-auto">
           <h2 className="font-display text-4xl font-bold">Everything you need to launch.</h2>
           <p className="mt-4 text-muted-foreground">
