@@ -152,8 +152,12 @@ function Landing() {
             { icon: Code2, title: "API-first", desc: "Every bot gets a unique API key. Build custom integrations beyond the widget." },
             { icon: Shield, title: "Per-tenant isolation", desc: "Row-level security on every table. Your knowledge never bleeds into another bot." },
             { icon: Zap, title: "Usage analytics", desc: "Track chats, top queries, and conversation history from a single dashboard." },
-          ].map((f) => (
-            <div key={f.title} className="rounded-xl border border-border bg-gradient-card p-6 hover:border-border-strong transition-colors">
+          ].map((f, i) => (
+            <div
+              key={f.title}
+              className="reveal rounded-xl border border-border bg-gradient-card p-6 hover:border-border-strong hover:-translate-y-1 transition-all duration-300"
+              style={{ transitionDelay: `${i * 60}ms` }}
+            >
               <div className="h-10 w-10 rounded-lg bg-accent flex items-center justify-center mb-4">
                 <f.icon className="h-5 w-5 text-primary" />
               </div>
