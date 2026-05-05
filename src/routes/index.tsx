@@ -1,4 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { ArrowRight, Bot, Code2, Database, MessageSquare, Shield, Sparkles, Upload, Zap } from "lucide-react";
 
@@ -17,6 +18,23 @@ export const Route = createFileRoute("/")({
 });
 
 function Landing() {
+  useEffect(() => {
+    const els = document.querySelectorAll<HTMLElement>(".reveal");
+    const io = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((e) => {
+          if (e.isIntersecting) {
+            e.target.classList.add("is-visible");
+            io.unobserve(e.target);
+          }
+        });
+      },
+      { threshold: 0.12, rootMargin: "0px 0px -40px 0px" }
+    );
+    els.forEach((el) => io.observe(el));
+    return () => io.disconnect();
+  }, []);
+
   return (
     <div className="min-h-screen bg-background bg-gradient-hero">
       {/* Nav */}
@@ -118,7 +136,7 @@ function Landing() {
       </section>
 
       {/* Features */}
-      <section id="features" className="mx-auto max-w-7xl px-6 py-24">
+      <section id="features" className="scroll-mt-24 mx-auto max-w-7xl px-6 py-24">
         <div className="text-center max-w-2xl mx-auto">
           <h2 className="font-display text-4xl font-bold">Everything you need to launch.</h2>
           <p className="mt-4 text-muted-foreground">
@@ -134,8 +152,12 @@ function Landing() {
             { icon: Code2, title: "API-first", desc: "Every bot gets a unique API key. Build custom integrations beyond the widget." },
             { icon: Shield, title: "Per-tenant isolation", desc: "Row-level security on every table. Your knowledge never bleeds into another bot." },
             { icon: Zap, title: "Usage analytics", desc: "Track chats, top queries, and conversation history from a single dashboard." },
-          ].map((f) => (
-            <div key={f.title} className="rounded-xl border border-border bg-gradient-card p-6 hover:border-border-strong transition-colors">
+          ].map((f, i) => (
+            <div
+              key={f.title}
+              className="reveal rounded-xl border border-border bg-gradient-card p-6 hover:border-border-strong hover:-translate-y-1 transition-all duration-300"
+              style={{ transitionDelay: `${i * 60}ms` }}
+            >
               <div className="h-10 w-10 rounded-lg bg-accent flex items-center justify-center mb-4">
                 <f.icon className="h-5 w-5 text-primary" />
               </div>
@@ -147,7 +169,7 @@ function Landing() {
       </section>
 
       {/* How it works */}
-      <section id="how" className="mx-auto max-w-7xl px-6 py-24 border-t border-border">
+      <section id="how" className="scroll-mt-24 mx-auto max-w-7xl px-6 py-24 border-t border-border">
         <div className="text-center max-w-2xl mx-auto">
           <h2 className="font-display text-4xl font-bold">From upload to embed in 4 steps.</h2>
         </div>
@@ -157,8 +179,12 @@ function Landing() {
             { n: "02", t: "Add knowledge", d: "Drag in files or paste URLs. We process everything in the background." },
             { n: "03", t: "Test & tune", d: "Chat with your bot in the playground. Tweak the prompt and welcome message." },
             { n: "04", t: "Embed", d: "Copy one snippet into your site. The widget appears instantly." },
-          ].map((s) => (
-            <div key={s.n} className="relative rounded-xl border border-border bg-gradient-card p-6">
+          ].map((s, i) => (
+            <div
+              key={s.n}
+              className="reveal relative rounded-xl border border-border bg-gradient-card p-6 hover:-translate-y-1 transition-transform duration-300"
+              style={{ transitionDelay: `${i * 80}ms` }}
+            >
               <div className="font-mono text-xs text-primary mb-3">{s.n}</div>
               <h3 className="font-semibold mb-2">{s.t}</h3>
               <p className="text-sm text-muted-foreground">{s.d}</p>
@@ -168,6 +194,7 @@ function Landing() {
       </section>
 
       {/* CTA */}
+      <span id="stack" className="block scroll-mt-24" />
       <section className="mx-auto max-w-7xl px-6 py-24">
         <div className="rounded-3xl border border-border-strong bg-gradient-card p-12 md:p-16 text-center relative overflow-hidden">
           <div className="absolute inset-0 bg-gradient-hero opacity-60" />

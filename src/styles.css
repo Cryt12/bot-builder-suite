@@ -114,7 +114,22 @@
 }
 
 /* Force dark theme always */
-html { color-scheme: dark; }
+html { color-scheme: dark; scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
+
+/* Reveal on scroll */
+.reveal {
+  opacity: 0;
+  transform: translateY(24px);
+  transition: opacity 700ms cubic-bezier(0.4, 0, 0.2, 1), transform 700ms cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: opacity, transform;
+}
+.reveal.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
 
 @layer base {
   * { border-color: var(--color-border); }
