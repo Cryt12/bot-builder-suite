@@ -1,4 +1,5 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { ArrowRight, Bot, Code2, Database, MessageSquare, Shield, Sparkles, Upload, Zap } from "lucide-react";
 
