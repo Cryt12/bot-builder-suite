@@ -169,7 +169,7 @@ function Landing() {
       </section>
 
       {/* How it works */}
-      <section id="how" className="mx-auto max-w-7xl px-6 py-24 border-t border-border">
+      <section id="how" className="scroll-mt-24 mx-auto max-w-7xl px-6 py-24 border-t border-border">
         <div className="text-center max-w-2xl mx-auto">
           <h2 className="font-display text-4xl font-bold">From upload to embed in 4 steps.</h2>
         </div>
