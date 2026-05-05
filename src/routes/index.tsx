@@ -179,8 +179,12 @@ function Landing() {
             { n: "02", t: "Add knowledge", d: "Drag in files or paste URLs. We process everything in the background." },
             { n: "03", t: "Test & tune", d: "Chat with your bot in the playground. Tweak the prompt and welcome message." },
             { n: "04", t: "Embed", d: "Copy one snippet into your site. The widget appears instantly." },
-          ].map((s) => (
-            <div key={s.n} className="relative rounded-xl border border-border bg-gradient-card p-6">
+          ].map((s, i) => (
+            <div
+              key={s.n}
+              className="reveal relative rounded-xl border border-border bg-gradient-card p-6 hover:-translate-y-1 transition-transform duration-300"
+              style={{ transitionDelay: `${i * 80}ms` }}
+            >
               <div className="font-mono text-xs text-primary mb-3">{s.n}</div>
               <h3 className="font-semibold mb-2">{s.t}</h3>
               <p className="text-sm text-muted-foreground">{s.d}</p>
