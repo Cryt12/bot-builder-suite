@@ -23,10 +23,16 @@ The app includes Laravel framework files, Composer dependencies, Eloquent models
 
 ## PostgreSQL Setup
 
-Create the database:
+Create the database manually:
 
 ```bash
 createdb helix
+```
+
+Or let the project do it for you:
+
+```bash
+composer run db:ensure
 ```
 
 Enable extensions as a PostgreSQL superuser or database owner:
@@ -58,6 +64,7 @@ composer install
 Then run:
 
 ```bash
+composer run db:ensure
 php artisan migrate
 php artisan db:seed
 ```

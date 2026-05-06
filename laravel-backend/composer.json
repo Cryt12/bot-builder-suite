@@ -35,10 +35,14 @@
         "setup": [
             "composer install",
             "@php -r \"file_exists('.env') || copy('.env.example', '.env');\"",
+            "@php scripts/ensure-database.php",
             "@php artisan key:generate",
             "@php artisan migrate --force",
             "npm install --ignore-scripts",
             "npm run build"
+        ],
+        "db:ensure": [
+            "@php scripts/ensure-database.php"
         ],
         "dev": [
             "Composer\\Config::disableProcessTimeout",
