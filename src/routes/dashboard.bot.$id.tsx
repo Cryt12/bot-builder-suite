@@ -12,14 +12,15 @@ import {
 import { Switch } from "@/components/ui/switch";
 import {
   ArrowLeft, Bot, Check, Code2, Copy, Database, FileText, Globe, Loader2,
-  MessageSquare, Plus, Send, Settings, Trash2, Upload, BarChart3, Sparkles,
+  MessageSquare, Plus, Send, Settings, Trash2, Upload, BarChart3, Sparkles, Download,
+  X,
 } from "lucide-react";
 import {
   getBot, updateBot, deleteBot, listSources, deleteSource,
-  ingestUrl, ingestRawText, ingestFile,
+  ingestUrl, ingestRawText, ingestFile, downloadSourceChunks,
   listConversations, getMessages, getAnalytics,
-} from "@/server/bots.functions";
-import { supabase } from "@/integrations/supabase/client";
+} from "@/lib/bots-api";
+import { getLaravelOrigin } from "@/lib/laravel-api";
 import { toast } from "sonner";
 
 const search = z.object({ tab: z.enum(["knowledge", "playground", "embed", "settings", "analytics", "history"]).optional().default("knowledge") });
@@ -87,7 +88,7 @@ function BotDetail() {
 
         <TabsContent value="knowledge" className="mt-6"><KnowledgeTab botId={id} /></TabsContent>
         <TabsContent value="playground" className="mt-6"><PlaygroundTab bot={bot} /></TabsContent>
-        <TabsContent value="embed" className="mt-6"><EmbedTab bot={bot} /></TabsContent>
+        <TabsContent value="embed" className="mt-6"><EmbedTab bot={bot} onChange={refresh} /></TabsContent>
         <TabsContent value="analytics" className="mt-6"><AnalyticsTab botId={id} /></TabsContent>
         <TabsContent value="history" className="mt-6"><HistoryTab botId={id} /></TabsContent>
         <TabsContent value="settings" className="mt-6"><SettingsTab bot={bot} onChange={refresh} /></TabsContent>
@@ -108,7 +109,7 @@ function KnowledgeTab({ botId }: { botId: string }) {
 
   async function refresh() {
     setLoading(true);
-    try { setSources((await listSources({ data: { chatbotId: botId } })).sources); }
+    try { setSources((await listSources({ data: { chatbotId: botId } })).sources ?? []); }
     catch (e: any) { toast.error(e.message); }
     finally { setLoading(false); }
   }
@@ -136,21 +137,16 @@ function KnowledgeTab({ botId }: { botId: string }) {
 
   async function handleFiles(files: FileList | null) {
     if (!files) return;
-    const { data: sess } = await supabase.auth.getUser();
-    const userId = sess.user?.id;
-    if (!userId) { toast.error("Not signed in"); return; }
     setBusy(true);
     try {
       for (const f of Array.from(files)) {
         const ext = f.name.split(".").pop()?.toLowerCase();
-        const kind = ext === "pdf" ? "pdf" : ext === "docx" ? "docx" : ext === "txt" || ext === "md" ? "txt" : null;
-        if (!kind) { toast.error(`${f.name}: unsupported type`); continue; }
+        const supported = ext === "pdf" || ext === "docx" || ext === "txt" || ext === "md";
+        if (!supported) { toast.error(`${f.name}: unsupported type`); continue; }
         if (f.size > 20 * 1024 * 1024) { toast.error(`${f.name}: file too large (>20MB)`); continue; }
-        const path = `${userId}/${botId}/${Date.now()}-${f.name.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
-        const { error: upErr } = await supabase.storage.from("knowledge").upload(path, f);
-        if (upErr) throw new Error(upErr.message);
-        await ingestFile({ data: { chatbotId: botId, storagePath: path, name: f.name, size: f.size, kind: kind as any } });
-        toast.success(`Imported ${f.name}`);
+        const result = await ingestFile({ data: { chatbotId: botId, file: f } });
+        const count = result.chunks === 1 ? "1 chunk" : `${result.chunks} chunks`;
+        toast.success(`Imported ${f.name} (${count})`);
       }
       refresh();
     } catch (e: any) { toast.error(e.message); }
@@ -161,6 +157,15 @@ function KnowledgeTab({ botId }: { botId: string }) {
     if (!confirm("Delete this source and its chunks?")) return;
     try { await deleteSource({ data: { id } }); refresh(); }
     catch (e: any) { toast.error(e.message); }
+  }
+
+  async function handleDownload(source: any) {
+    try {
+      await downloadSourceChunks({ data: { id: source.id, name: source.name } });
+      toast.success(`Downloaded chunks for ${source.name}`);
+    } catch (e: any) {
+      toast.error(e.message);
+    }
   }
 
   return (
@@ -211,9 +216,19 @@ function KnowledgeTab({ botId }: { botId: string }) {
                       : <span className="flex items-center gap-1"><Loader2 className="h-3 w-3 animate-spin" /> {s.status}</span>}
                   </div>
                 </div>
-                <button onClick={() => remove(s.id)} className="p-1.5 text-muted-foreground hover:text-destructive rounded-md hover:bg-destructive/10">
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => handleDownload(s)}
+                    disabled={s.status !== "ready" || !s.chunk_count}
+                    className="p-1.5 text-muted-foreground hover:text-foreground rounded-md hover:bg-accent/60 disabled:opacity-40 disabled:cursor-not-allowed"
+                    title="Download source chunks"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                  </button>
+                  <button onClick={() => remove(s.id)} className="p-1.5 text-muted-foreground hover:text-destructive rounded-md hover:bg-destructive/10">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </li>
             ))}
           </ul>
@@ -293,13 +308,33 @@ function PlaygroundTab({ bot }: { bot: any }) {
 }
 
 // ---------- Embed ----------
-function EmbedTab({ bot }: { bot: any }) {
+function normalizeDomain(value: string) {
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed) return "";
+
+  try {
+    const url = trimmed.includes("://") ? new URL(trimmed) : new URL(`http://${trimmed}`);
+    return url.hostname;
+  } catch {
+    return trimmed.split("/")[0].split(":")[0];
+  }
+}
+
+function EmbedTab({ bot, onChange }: { bot: any; onChange: () => void }) {
   const [copied, setCopied] = useState<string | null>(null);
-  const origin = typeof window !== "undefined" ? window.location.origin : "";
-  const snippet = `<script src="${origin}/api/public/widget.js" data-api-key="${bot.api_key}" defer></script>`;
-  const apiCurl = `curl -X POST ${origin}/api/public/chat \\
+  const [domains, setDomains] = useState<string[]>(bot.allowed_domains ?? []);
+  const [domainInput, setDomainInput] = useState("");
+  const [savingDomains, setSavingDomains] = useState(false);
+  const widgetOrigin = getLaravelOrigin() || "http://127.0.0.1:8082";
+  const snippet = `<script src="${widgetOrigin}/api/public/widget.js" data-api-key="${bot.api_key}" defer></script>`;
+  const apiCurl = `curl -X POST ${widgetOrigin}/api/public/chat \\
   -H "Content-Type: application/json" \\
   -d '{"apiKey":"${bot.api_key}","message":"Hello"}'`;
+
+  useEffect(() => {
+    setDomains(bot.allowed_domains ?? []);
+    setDomainInput("");
+  }, [bot.id, bot.allowed_domains]);
 
   function copy(text: string, k: string) {
     navigator.clipboard.writeText(text);
@@ -307,8 +342,81 @@ function EmbedTab({ bot }: { bot: any }) {
     toast.success("Copied to clipboard");
   }
 
+  function addDomain() {
+    const domain = normalizeDomain(domainInput);
+    if (!domain) return;
+    setDomains((current) => current.includes(domain) ? current : [...current, domain]);
+    setDomainInput("");
+  }
+
+  function removeDomain(domain: string) {
+    setDomains((current) => current.filter((d) => d !== domain));
+  }
+
+  async function saveDomains() {
+    const pending = normalizeDomain(domainInput);
+    const nextDomains = pending && !domains.includes(pending)
+      ? [...domains, pending]
+      : domains;
+
+    if (nextDomains.length === 0) {
+      toast.error("At least one domain is required");
+      return;
+    }
+
+    setSavingDomains(true);
+    try {
+      const response = await updateBot({ data: { id: bot.id, allowed_domains: nextDomains } });
+      setDomains(response.bot.allowed_domains ?? nextDomains);
+      setDomainInput("");
+      toast.success("Allowed domains saved");
+      onChange();
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setSavingDomains(false);
+    }
+  }
+
   return (
     <div className="space-y-6 max-w-3xl">
+      <div className="rounded-xl border border-border bg-gradient-card p-6">
+        <h3 className="font-semibold mb-1 flex items-center gap-2"><Globe className="h-4 w-4 text-primary" /> Allowed domains <span className="text-destructive">*</span></h3>
+        {domains.length === 0 && <p className="text-sm text-destructive mb-3">At least one domain is required.</p>}
+        <div className="flex gap-2">
+          <Input
+            value={domainInput}
+            onChange={(e) => setDomainInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                addDomain();
+              }
+            }}
+            placeholder="example.com or https://example.com/page"
+          />
+          <Button type="button" variant="outline" onClick={addDomain} className="shrink-0 bg-surface">
+            <Plus className="h-4 w-4" />
+          </Button>
+        </div>
+        <p className="text-xs text-muted-foreground mt-2">Press Enter or + to add. Paste a full URL and Helix will extract the domain. e.g. localhost, 127.0.0.1, mysite.com</p>
+        {domains.length > 0 && (
+          <div className="mt-4 flex flex-wrap gap-2">
+            {domains.map((domain) => (
+              <span key={domain} className="inline-flex items-center gap-2 rounded-md border border-border bg-surface px-2.5 py-1 text-sm">
+                {domain}
+                <button type="button" onClick={() => removeDomain(domain)} className="rounded-sm text-muted-foreground hover:text-destructive">
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        <Button onClick={saveDomains} disabled={savingDomains || domains.length === 0} className="mt-4 bg-gradient-primary text-primary-foreground">
+          {savingDomains ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save domains"}
+        </Button>
+      </div>
+
       <div className="rounded-xl border border-border bg-gradient-card p-6">
         <h3 className="font-semibold mb-1 flex items-center gap-2"><Code2 className="h-4 w-4 text-primary" /> Embed snippet</h3>
         <p className="text-sm text-muted-foreground mb-4">Paste this into your site's HTML, just before <code className="text-xs bg-surface px-1.5 py-0.5 rounded">&lt;/body&gt;</code>.</p>
@@ -348,7 +456,8 @@ function AnalyticsTab({ botId }: { botId: string }) {
   const [data, setData] = useState<any>(null);
   useEffect(() => { getAnalytics({ data: { chatbotId: botId } }).then(setData).catch((e) => toast.error(e.message)); }, [botId]);
   if (!data) return <Loader2 className="h-5 w-5 animate-spin" />;
-  const max = Math.max(1, ...data.daily.map((d: any) => d.chats));
+  const daily = data.daily ?? [];
+  const max = Math.max(1, ...daily.map((d: any) => d.chats));
   return (
     <div className="space-y-6 max-w-4xl">
       <div className="grid sm:grid-cols-2 gap-4">
@@ -364,7 +473,7 @@ function AnalyticsTab({ botId }: { botId: string }) {
       <div className="rounded-xl border border-border bg-gradient-card p-6">
         <div className="text-xs uppercase tracking-wider text-muted-foreground mb-4">Daily chats</div>
         <div className="flex items-end gap-1 h-40">
-          {data.daily.map((d: any) => (
+          {daily.map((d: any) => (
             <div key={d.date} className="flex-1 flex flex-col items-center gap-1 group">
               <div className="w-full bg-gradient-primary rounded-t-sm transition-all relative" style={{ height: `${(d.chats / max) * 100}%`, minHeight: d.chats ? 2 : 0 }}>
                 <div className="absolute -top-6 left-1/2 -translate-x-1/2 text-[10px] opacity-0 group-hover:opacity-100 bg-popover px-1.5 py-0.5 rounded">{d.chats}</div>
@@ -373,8 +482,8 @@ function AnalyticsTab({ botId }: { botId: string }) {
           ))}
         </div>
         <div className="flex justify-between text-[10px] text-muted-foreground mt-2">
-          <span>{data.daily[0]?.date}</span>
-          <span>{data.daily[data.daily.length - 1]?.date}</span>
+          <span>{daily[0]?.date}</span>
+          <span>{daily[daily.length - 1]?.date}</span>
         </div>
       </div>
     </div>
@@ -390,12 +499,12 @@ function HistoryTab({ botId }: { botId: string }) {
 
   useEffect(() => {
     listConversations({ data: { chatbotId: botId } })
-      .then((r) => { setConvs(r.conversations); if (r.conversations[0]) setActive(r.conversations[0].id); })
+      .then((r) => { const rows = r.conversations ?? []; setConvs(rows); if (rows[0]) setActive(rows[0].id); })
       .catch((e) => toast.error(e.message))
       .finally(() => setLoading(false));
   }, [botId]);
 
-  useEffect(() => { if (active) getMessages({ data: { conversationId: active } }).then((r) => setMsgs(r.messages)); }, [active]);
+  useEffect(() => { if (active) getMessages({ data: { conversationId: active } }).then((r) => setMsgs(r.messages ?? [])); }, [active]);
 
   if (loading) return <Loader2 className="h-5 w-5 animate-spin" />;
   if (convs.length === 0) return <div className="rounded-xl border border-dashed border-border p-12 text-center text-sm text-muted-foreground">No conversations yet. Once visitors chat with your bot, they'll appear here.</div>;
@@ -432,6 +541,7 @@ function SettingsTab({ bot, onChange }: { bot: any; onChange: () => void }) {
     bubble_position: bot.bubble_position,
     tone: bot.tone,
     collect_email: bot.collect_email,
+    allowed_domains: bot.allowed_domains ?? [],
   });
   const [saving, setSaving] = useState(false);
 

@@ -1,7 +1,8 @@
-import { createFileRoute, redirect, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { z } from "zod";
-import { supabase } from "@/integrations/supabase/client";
+import { authStorage, laravelRequest, type AuthResponse } from "@/lib/laravel-api";
+import { useAuth } from "@/lib/auth-context";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -27,32 +28,32 @@ function AuthPage() {
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(false);
   const navigate = useNavigate();
+  const { user, refreshUser } = useAuth();
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      if (data.session) navigate({ to: "/dashboard" });
-    });
-  }, [navigate]);
+    if (user) navigate({ to: "/dashboard" });
+  }, [user, navigate]);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
     try {
       if (mode === "signup") {
-        const { error } = await supabase.auth.signUp({
-          email,
-          password,
-          options: {
-            data: { display_name: name || email.split("@")[0] },
-            emailRedirectTo: window.location.origin + "/dashboard",
-          },
+        const data = await laravelRequest<AuthResponse>("/auth/register", {
+          method: "POST",
+          body: JSON.stringify({ name: name || email.split("@")[0], email, password }),
         });
-        if (error) throw error;
+        authStorage.setToken(data.token);
+        await refreshUser();
         toast.success("Account created! Welcome.");
         navigate({ to: "/dashboard" });
       } else {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
+        const data = await laravelRequest<AuthResponse>("/auth/login", {
+          method: "POST",
+          body: JSON.stringify({ email, password }),
+        });
+        authStorage.setToken(data.token);
+        await refreshUser();
         toast.success("Welcome back.");
         navigate({ to: "/dashboard" });
       }

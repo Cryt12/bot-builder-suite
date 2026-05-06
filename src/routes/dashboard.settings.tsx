@@ -1,5 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { Bot, MessageSquare, FileText, Users, BarChart3, Palette, Search, BadgeCheck } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { Settings, Shield, User } from "lucide-react";
 
 export const Route = createFileRoute("/dashboard/settings")({
   component: SettingsPage,
@@ -7,58 +11,47 @@ export const Route = createFileRoute("/dashboard/settings")({
 
 function SettingsPage() {
   return (
-    <div className="p-8 max-w-5xl mx-auto space-y-6">
-      <h1 className="font-display text-3xl font-bold">Settings</h1>
+    <div className="p-8 max-w-3xl mx-auto space-y-6">
+      <h1 className="font-display text-3xl font-bold flex items-center gap-3">
+        <Settings className="h-7 w-7" /> Settings
+      </h1>
 
-      <section className="rounded-2xl border border-border bg-gradient-card p-6">
-        <div className="flex items-start justify-between mb-2">
-          <h2 className="font-semibold">Current Plan</h2>
-          <span className="text-xs px-2.5 py-1 rounded-full bg-muted text-muted-foreground border border-border">Free</span>
+      <section className="rounded-2xl border border-border bg-gradient-card p-6 space-y-4">
+        <h2 className="font-semibold flex items-center gap-2">
+          <User className="h-4 w-4 text-primary" /> Profile
+        </h2>
+        <div className="grid sm:grid-cols-2 gap-4">
+          <div className="space-y-1.5">
+            <Label htmlFor="display-name">Display name</Label>
+            <Input id="display-name" placeholder="Your name" />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="email">Email</Label>
+            <Input id="email" type="email" placeholder="you@company.com" />
+          </div>
         </div>
-        <p className="text-sm text-muted-foreground">Try Tuqlas with zero commitment</p>
-        <p className="mt-3"><span className="text-2xl font-bold">₱0</span> <span className="text-muted-foreground text-sm">forever</span></p>
+        <Button className="bg-gradient-primary text-primary-foreground">Save profile</Button>
       </section>
 
-      <section className="rounded-2xl border border-border bg-gradient-card p-6">
-        <h2 className="font-semibold mb-1">Usage This Cycle</h2>
-        <p className="text-xs text-muted-foreground mb-5">Billing cycle: May 1 — Jun 1, 2026</p>
-        <Usage label="Chatbots" value={0} max={1} />
-        <Usage label="Messages" value={0} max={50} />
-      </section>
-
-      <section className="rounded-2xl border border-border bg-gradient-card p-6">
-        <h2 className="font-semibold mb-4">Plan Limits</h2>
-        <div className="grid sm:grid-cols-2 gap-y-3 gap-x-8 text-sm">
-          <Limit icon={<Bot className="h-4 w-4 text-info" />} text="1 chatbot" />
-          <Limit icon={<MessageSquare className="h-4 w-4 text-info" />} text="50 msgs/mo" />
-          <Limit icon={<FileText className="h-4 w-4 text-info" />} text="1 files/chatbot" />
-          <Limit icon={<FileText className="h-4 w-4 text-info" />} text="5k chars/file" />
-          <Limit icon={<Users className="h-4 w-4 text-info" />} text="No lead capture" />
-          <Limit icon={<BarChart3 className="h-4 w-4 text-info" />} text="No analytics" />
-          <Limit icon={<Palette className="h-4 w-4 text-info" />} text="No custom appearance" />
-          <Limit icon={<BadgeCheck className="h-4 w-4 text-info" />} text="Tuqlas branding" />
-          <Limit icon={<Search className="h-4 w-4 text-primary" />} text="No vector search" />
+      <section className="rounded-2xl border border-border bg-gradient-card p-6 space-y-4">
+        <h2 className="font-semibold flex items-center gap-2">
+          <Shield className="h-4 w-4 text-primary" /> Workspace
+        </h2>
+        <div className="flex items-center justify-between rounded-lg border border-border p-3">
+          <div>
+            <div className="text-sm font-medium">Email notifications</div>
+            <div className="text-xs text-muted-foreground">Receive alerts when a chatbot captures a lead.</div>
+          </div>
+          <Switch defaultChecked />
+        </div>
+        <div className="flex items-center justify-between rounded-lg border border-border p-3">
+          <div>
+            <div className="text-sm font-medium">Weekly summary</div>
+            <div className="text-xs text-muted-foreground">Get a digest of chatbot activity and feedback.</div>
+          </div>
+          <Switch />
         </div>
       </section>
     </div>
   );
-}
-
-function Usage({ label, value, max }: { label: string; value: number; max: number }) {
-  const pct = Math.min(100, (value / max) * 100);
-  return (
-    <div className="mb-4 last:mb-0">
-      <div className="flex justify-between text-sm mb-1.5">
-        <span>{label}</span>
-        <span className="font-mono text-muted-foreground">{value} / {max}</span>
-      </div>
-      <div className="h-1.5 rounded-full bg-surface overflow-hidden">
-        <div className="h-full bg-info rounded-full" style={{ width: `${Math.max(pct, 1.5)}%` }} />
-      </div>
-    </div>
-  );
-}
-
-function Limit({ icon, text }: any) {
-  return <div className="flex items-center gap-2 text-muted-foreground">{icon}<span>{text}</span></div>;
 }

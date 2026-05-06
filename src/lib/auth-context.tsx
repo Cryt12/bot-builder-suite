@@ -1,39 +1,70 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
-import { supabase } from "@/integrations/supabase/client";
-import type { Session, User } from "@supabase/supabase-js";
+import { authStorage, laravelRequest, type LaravelUser } from "@/lib/laravel-api";
 
 interface AuthCtx {
-  user: User | null;
-  session: Session | null;
+  user: LaravelUser | null;
+  token: string | null;
   loading: boolean;
+  refreshUser: () => Promise<void>;
   signOut: () => Promise<void>;
 }
 
-const Ctx = createContext<AuthCtx>({ user: null, session: null, loading: true, signOut: async () => {} });
+const Ctx = createContext<AuthCtx>({
+  user: null,
+  token: null,
+  loading: true,
+  refreshUser: async () => {},
+  signOut: async () => {},
+});
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [session, setSession] = useState<Session | null>(null);
+  const [user, setUser] = useState<LaravelUser | null>(null);
+  const [token, setToken] = useState<string | null>(() => authStorage.getToken());
   const [loading, setLoading] = useState(true);
 
+  async function refreshUser() {
+    const savedToken = authStorage.getToken();
+
+    if (!savedToken) {
+      setUser(null);
+      setToken(null);
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const data = await laravelRequest<{ user: LaravelUser }>("/auth/me", { token: savedToken });
+      setToken(savedToken);
+      setUser(data.user);
+    } catch {
+      authStorage.clear();
+      setToken(null);
+      setUser(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => {
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, s) => {
-      setSession(s);
-      setLoading(false);
-    });
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session);
-      setLoading(false);
-    });
-    return () => sub.subscription.unsubscribe();
+    refreshUser();
   }, []);
 
   return (
     <Ctx.Provider
       value={{
-        user: session?.user ?? null,
-        session,
+        user,
+        token,
         loading,
-        signOut: async () => { await supabase.auth.signOut(); },
+        refreshUser,
+        signOut: async () => {
+          const savedToken = authStorage.getToken();
+          if (savedToken) {
+            await laravelRequest("/auth/logout", { method: "POST", token: savedToken }).catch(() => {});
+          }
+          authStorage.clear();
+          setToken(null);
+          setUser(null);
+        },
       }}
     >
       {children}

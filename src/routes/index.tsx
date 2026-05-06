@@ -126,7 +126,7 @@ function Landing() {
                     What's your refund policy?
                   </div>
                   <div className="rounded-2xl rounded-tl-sm bg-surface px-4 py-3 text-sm text-left max-w-[90%]">
-                    We offer a 30-day money-back guarantee on all paid plans, no questions asked.
+                    We answer from your uploaded policy docs and website content.
                   </div>
                 </div>
               </div>

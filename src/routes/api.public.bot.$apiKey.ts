@@ -1,25 +1,23 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { supabaseAdmin } from "@/integrations/supabase/client.server";
 
 const cors = { "Access-Control-Allow-Origin": "*" };
+const API_BASE = process.env.LARAVEL_API_URL ?? "http://127.0.0.1:8082/api";
 
 export const Route = createFileRoute("/api/public/bot/$apiKey")({
   server: {
     handlers: {
       OPTIONS: async () => new Response(null, { status: 204, headers: cors }),
-      GET: async ({ params }) => {
-        const { data: bot, error } = await supabaseAdmin
-          .from("chatbots")
-          .select("name, welcome_message, primary_color, bubble_position, collect_email, is_active")
-          .eq("api_key", params.apiKey)
-          .single();
-        if (error || !bot || !bot.is_active) {
-          return new Response(JSON.stringify({ error: "Not found" }), {
-            status: 404, headers: { ...cors, "Content-Type": "application/json" },
-          });
-        }
-        return new Response(JSON.stringify(bot), {
-          status: 200,
+      GET: async ({ params, request }) => {
+        const response = await fetch(`${API_BASE}/public/bot/${params.apiKey}`, {
+          headers: {
+            Accept: "application/json",
+            ...(request.headers.get("origin") ? { Origin: request.headers.get("origin")! } : {}),
+            ...(request.headers.get("referer") ? { Referer: request.headers.get("referer")! } : {}),
+          },
+        });
+
+        return new Response(await response.text(), {
+          status: response.status,
           headers: { ...cors, "Content-Type": "application/json", "Cache-Control": "public, max-age=60" },
         });
       },

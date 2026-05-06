@@ -1,8 +1,8 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Bot, MessageSquare, ArrowUpRight, Plus } from "lucide-react";
-import { listBots } from "@/server/bots.functions";
+import { Bot, MessageSquare, ArrowUpRight, Plus, Settings } from "lucide-react";
+import { listBots } from "@/lib/bots-api";
 
 export const Route = createFileRoute("/dashboard/")({
   component: Overview,
@@ -11,7 +11,7 @@ export const Route = createFileRoute("/dashboard/")({
 function Overview() {
   const [count, setCount] = useState(0);
   useEffect(() => {
-    listBots().then((r) => setCount(r.bots.length)).catch(() => {});
+    listBots().then((r) => setCount((r.bots ?? []).length)).catch(() => {});
   }, []);
 
   return (
@@ -26,15 +26,15 @@ function Overview() {
       </header>
 
       <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4 mb-10">
-        <StatCard icon={<Bot className="h-5 w-5 text-primary" />} value={count} suffix="/ 1" label="Chatbots" tint="primary" />
-        <StatCard icon={<MessageSquare className="h-5 w-5 text-info" />} value={0} suffix="/ 50" label="Messages this month" tint="info" />
-        <StatCard icon={<ArrowUpRight className="h-5 w-5 text-primary" />} value="Free" label="Current plan" tint="primary" big />
+        <StatCard icon={<Bot className="h-5 w-5 text-primary" />} value={count} label="Chatbots" tint="primary" />
+        <StatCard icon={<MessageSquare className="h-5 w-5 text-info" />} value={0} label="Messages this month" tint="info" />
+        <StatCard icon={<Settings className="h-5 w-5 text-primary" />} value="Ready" label="Workspace" tint="primary" big />
       </div>
 
       <h2 className="text-sm font-medium text-muted-foreground mb-3">Quick Actions</h2>
       <div className="grid sm:grid-cols-2 gap-4">
         <QuickAction to="/dashboard/chatbots" icon={<Bot className="h-4 w-4 text-primary" />} label="Manage Chatbots" />
-        <QuickAction to="/dashboard/settings" icon={<ArrowUpRight className="h-4 w-4 text-info" />} label="Subscription & Billing" />
+        <QuickAction to="/dashboard/settings" icon={<Settings className="h-4 w-4 text-info" />} label="Workspace Settings" />
       </div>
     </div>
   );

@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Bot, Plus, MessageSquare, Database, Loader2 } from "lucide-react";
-import { listBots, createBot } from "@/server/bots.functions";
+import { listBots, createBot } from "@/lib/bots-api";
 import { toast } from "sonner";
 
 export const Route = createFileRoute("/dashboard/chatbots")({
@@ -23,7 +23,7 @@ function BotsList() {
     setLoading(true);
     try {
       const { bots } = await listBots();
-      setBots(bots);
+      setBots(bots ?? []);
     } catch (e: any) { toast.error(e.message); }
     finally { setLoading(false); }
   }

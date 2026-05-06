@@ -97,9 +97,6 @@ function DashboardLayout() {
               <>
                 <div className="flex-1 min-w-0 flex items-center gap-2">
                   <span className="text-xs font-medium truncate">Account</span>
-                  <span className="text-[9px] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
-                    Free
-                  </span>
                 </div>
                 <button
                   onClick={() => { signOut(); navigate({ to: "/" }); }}

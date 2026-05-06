@@ -1,0 +1,134 @@
+{
+  "version": "1.0",
+  "description": "Web scraping configuration for chatbot knowledge ingestion",
+  "scraping_rules": {
+    "start_urls": [
+      "https://sp.butuan.gov.ph/legislations/",
+      "https://sp.butuan.gov.ph/legislations/#",
+      "https://sp.butuan.gov.ph/city-ordinances/"
+    ],
+    "base_url": "https://sp.butuan.gov.ph/legislations/",
+    "target_folders": ["Ordinances", "Resolutions"],
+    "recursive_depth": 20,
+    "delay_between_actions": 1.5,
+    "timeout_ms": 60000
+  },
+  "filtering": {
+    "skip_keywords": [
+      "traffic",
+      "transport",
+      "transportation",
+      "routing",
+      "route",
+      "road",
+      "street",
+      "parking",
+      "tricycle",
+      "vehicular",
+      "terminal",
+      "franchise",
+      "highway",
+      "traffic management",
+      "transport code"
+    ],
+    "ignore_folder_names": [".", ".."],
+    "downloadable_extensions": [
+      ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt"
+    ]
+  },
+  "classification": {
+    "categories": {
+      "zoning_land_use": {
+        "keywords": [
+          "zoning",
+          "land use",
+          "comprehensive zoning",
+          "urban planning",
+          "rezoning"
+        ]
+      },
+      "environment": {
+        "keywords": [
+          "environment",
+          "ecological",
+          "waste",
+          "watershed",
+          "climate",
+          "solid waste",
+          "pollution",
+          "sanitation"
+        ]
+      },
+      "business_tax_revenue": {
+        "keywords": [
+          "business",
+          "permit",
+          "tax",
+          "revenue",
+          "fees",
+          "fiscal",
+          "budget",
+          "market code"
+        ]
+      },
+      "governance_administration": {
+        "keywords": [
+          "administrative",
+          "governance",
+          "procedure",
+          "local government",
+          "authority",
+          "office",
+          "regulatory"
+        ]
+      },
+      "social_services": {
+        "keywords": [
+          "children",
+          "youth",
+          "welfare",
+          "health",
+          "gender",
+          "gad",
+          "mental health",
+          "senior citizen",
+          "pwd",
+          "lactation",
+          "education"
+        ]
+      },
+      "public_safety": {
+        "keywords": [
+          "firecracker",
+          "public safety",
+          "emergency",
+          "animal",
+          "safe spaces",
+          "disaster",
+          "curfew"
+        ]
+      },
+      "tourism_culture": {
+        "keywords": [
+          "tourism",
+          "culture",
+          "heritage",
+          "festival"
+        ]
+      },
+      "general_ordinances": {
+        "keywords": [
+          "code of general ordinances",
+          "general ordinances",
+          "ordinance"
+        ]
+      }
+    }
+  },
+  "output": {
+    "output_dir": "butuan_ordinance_output",
+    "state_file": "scrape_state.json",
+    "manifest_file": "manifest.csv",
+    "screenshot_dir": "debug_screens"
+  }
+}
