@@ -1,9 +1,10 @@
 import { createFileRoute, Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
+import { AppLogo } from "@/components/app-logo";
 import { useAuth } from "@/lib/auth-context";
 import {
   LayoutGrid, Bell, Bot, BookOpen, Users, BarChart3, Plug, Settings, MessageSquareHeart,
-  ChevronLeft, ChevronRight, LogOut, Loader2,
+  ChevronLeft, ChevronRight, LogOut, Loader2, Shield,
 } from "lucide-react";
 
 export const Route = createFileRoute("/dashboard")({
@@ -21,6 +22,8 @@ const NAV: { to: any; label: string; icon: any; exact?: boolean }[] = [
   { to: "/dashboard/settings", label: "Settings", icon: Settings },
   { to: "/dashboard/feedback", label: "Feedback", icon: MessageSquareHeart },
 ];
+
+const ADMIN_NAV = { to: "/dashboard/admin", label: "Admin", icon: Shield };
 
 function DashboardLayout() {
   const { user, loading, signOut } = useAuth();
@@ -47,14 +50,11 @@ function DashboardLayout() {
       >
         <div className="flex items-center gap-2 p-5 border-b border-sidebar-border h-[72px]">
           <Link to="/" className="flex items-center gap-2 font-display font-extrabold text-xl">
-            <span className="h-8 w-8 rounded-lg bg-gradient-primary shadow-glow flex items-center justify-center">
-              <Bot className="h-5 w-5 text-primary-foreground" />
-            </span>
-            {!collapsed && (
-              <span className="bg-gradient-to-r from-primary to-primary-glow bg-clip-text text-transparent tracking-wide">
-                Helix
-              </span>
-            )}
+            <AppLogo
+              imageClassName="h-8 w-8 shadow-glow"
+              textClassName="bg-gradient-to-r from-primary to-primary-glow bg-clip-text text-xl font-extrabold tracking-wide text-transparent"
+              showWordmark={!collapsed}
+            />
           </Link>
           <button
             onClick={() => setCollapsed((c) => !c)}
@@ -66,7 +66,7 @@ function DashboardLayout() {
         </div>
 
         <nav className="flex-1 p-3 space-y-1 overflow-y-auto">
-          {NAV.map(({ to, label, icon: Icon, exact }) => {
+          {[...NAV, ...(user.role === "admin" ? [ADMIN_NAV] : [])].map(({ to, label, icon: Icon, exact }) => {
             const active = exact
               ? location.pathname === to
               : location.pathname === to || location.pathname.startsWith(to + "/");

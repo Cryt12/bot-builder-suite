@@ -3,10 +3,11 @@ import { useEffect, useState } from "react";
 import { z } from "zod";
 import { authStorage, laravelRequest, type AuthResponse } from "@/lib/laravel-api";
 import { useAuth } from "@/lib/auth-context";
+import { AppLogo } from "@/components/app-logo";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Bot, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { Link } from "@tanstack/react-router";
 
@@ -68,10 +69,7 @@ function AuthPage() {
     <div className="min-h-screen flex items-center justify-center bg-background bg-gradient-hero p-6">
       <div className="w-full max-w-md">
         <Link to="/" className="flex items-center justify-center gap-2 font-display font-bold text-lg mb-8">
-          <span className="h-9 w-9 rounded-lg bg-gradient-primary shadow-glow flex items-center justify-center">
-            <Bot className="h-5 w-5 text-primary-foreground" />
-          </span>
-          Helix
+          <AppLogo imageClassName="h-9 w-9 shadow-glow" />
         </Link>
 
         <div className="rounded-2xl border border-border-strong bg-gradient-card p-8 shadow-elegant">

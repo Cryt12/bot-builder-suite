@@ -1,7 +1,8 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import { ArrowRight, Bot, Code2, Database, MessageSquare, Shield, Sparkles, Upload, Zap } from "lucide-react";
+import { AppLogo } from "@/components/app-logo";
+import { ArrowRight, Code2, Database, MessageSquare, Shield, Sparkles, Upload, Zap } from "lucide-react";
 
 export const Route = createFileRoute("/")({
   component: Landing,
@@ -41,10 +42,7 @@ function Landing() {
       <header className="sticky top-0 z-40 border-b border-border/50 backdrop-blur-xl bg-background/60">
         <div className="mx-auto max-w-7xl px-6 h-16 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2 font-display font-bold text-lg">
-            <span className="relative inline-flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-primary shadow-glow">
-              <Bot className="h-5 w-5 text-primary-foreground" />
-            </span>
-            <span>Helix</span>
+            <AppLogo imageClassName="h-8 w-8 shadow-glow" />
           </Link>
           <nav className="hidden md:flex items-center gap-8 text-sm text-muted-foreground">
             <a href="#features" className="hover:text-foreground transition-colors">Features</a>
@@ -68,10 +66,6 @@ function Landing() {
       <section className="relative overflow-hidden">
         <div className="absolute inset-0 grid-bg opacity-40 [mask-image:radial-gradient(ellipse_at_center,black,transparent_70%)]" />
         <div className="relative mx-auto max-w-7xl px-6 pt-24 pb-32 text-center">
-          <div className="inline-flex items-center gap-2 rounded-full border border-border-strong bg-surface/60 px-3 py-1 text-xs text-muted-foreground backdrop-blur">
-            <Sparkles className="h-3.5 w-3.5 text-primary" />
-            Powered by retrieval-augmented generation
-          </div>
           <h1 className="mt-8 font-display text-5xl md:text-7xl font-bold tracking-tight">
             Ship AI chatbots that
             <br />
@@ -175,7 +169,7 @@ function Landing() {
         </div>
         <div className="mt-16 grid md:grid-cols-4 gap-6">
           {[
-            { n: "01", t: "Create a bot", d: "Name it, pick a tone, choose a color. Done." },
+            { n: "01", t: "Create a bot", d: "Name it, pick a tone, choose a color or upload your own logo. Done." },
             { n: "02", t: "Add knowledge", d: "Drag in files or paste URLs. We process everything in the background." },
             { n: "03", t: "Test & tune", d: "Chat with your bot in the playground. Tweak the prompt and welcome message." },
             { n: "04", t: "Embed", d: "Copy one snippet into your site. The widget appears instantly." },
@@ -213,10 +207,7 @@ function Landing() {
       <footer className="border-t border-border">
         <div className="mx-auto max-w-7xl px-6 py-8 flex flex-col md:flex-row items-center justify-between gap-4 text-sm text-muted-foreground">
           <div className="flex items-center gap-2">
-            <span className="h-6 w-6 rounded-md bg-gradient-primary flex items-center justify-center">
-              <Bot className="h-3.5 w-3.5 text-primary-foreground" />
-            </span>
-            Helix
+            <AppLogo imageClassName="h-6 w-6 rounded-md" textClassName="text-sm font-medium" />
           </div>
           <div>© {new Date().getFullYear()} Helix. All rights reserved.</div>
         </div>

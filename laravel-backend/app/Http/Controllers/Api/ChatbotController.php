@@ -20,15 +20,100 @@ use Symfony\Component\Process\Process;
 
 class ChatbotController extends Controller
 {
-    public function index(Request $request): JsonResponse
+    public function dashboardAnalytics(Request $request): JsonResponse
     {
         $user = $request->attributes->get('auth_user');
+        $bots = $this->visibleBotsQuery($request)
+            ->orderBy('name')
+            ->get(['id', 'name', 'primary_color', 'is_active']);
+
+        if ($bots->isEmpty()) {
+            return $this->json([
+                'messagesThisMonth' => 0,
+                'sessionsThisMonth' => 0,
+                'avgMessagesPerSession' => 0,
+                'daily' => collect(range(29, 0))->map(fn (int $offset) => [
+                    'date' => now()->subDays($offset)->toDateString(),
+                    'messages' => 0,
+                ])->values(),
+                'perBot' => [],
+            ]);
+        }
+
+        $botIds = $bots->pluck('id');
+        $monthStart = now()->startOfMonth();
+        $since30Days = now()->subDays(30);
+
+        $sessionsByBot = Conversation::query()
+            ->select('chatbot_id', DB::raw('count(*) as sessions'))
+            ->whereIn('chatbot_id', $botIds)
+            ->where('created_at', '>=', $monthStart)
+            ->groupBy('chatbot_id')
+            ->pluck('sessions', 'chatbot_id');
+
+        $messagesByBot = Message::query()
+            ->join('conversations', 'conversations.id', '=', 'messages.conversation_id')
+            ->select('conversations.chatbot_id', DB::raw('count(messages.id) as messages'))
+            ->whereIn('conversations.chatbot_id', $botIds)
+            ->where('messages.role', 'user')
+            ->where('messages.created_at', '>=', $monthStart)
+            ->groupBy('conversations.chatbot_id')
+            ->pluck('messages', 'conversations.chatbot_id');
+
+        $dailyRows = Message::query()
+            ->join('conversations', 'conversations.id', '=', 'messages.conversation_id')
+            ->select(DB::raw("to_char(messages.created_at::date, 'YYYY-MM-DD') as date"), DB::raw('count(messages.id) as messages'))
+            ->whereIn('conversations.chatbot_id', $botIds)
+            ->where('messages.role', 'user')
+            ->where('messages.created_at', '>=', $since30Days)
+            ->groupBy(DB::raw('messages.created_at::date'))
+            ->pluck('messages', 'date');
+
+        $daily = collect(range(29, 0))->map(function (int $offset) use ($dailyRows) {
+            $date = now()->subDays($offset)->toDateString();
+
+            return [
+                'date' => $date,
+                'messages' => (int) ($dailyRows[$date] ?? 0),
+            ];
+        })->values();
+
+        $perBot = $bots->map(function (Chatbot $bot) use ($sessionsByBot, $messagesByBot) {
+            $sessions = (int) ($sessionsByBot[$bot->id] ?? 0);
+            $messages = (int) ($messagesByBot[$bot->id] ?? 0);
+
+            return [
+                'id' => $bot->id,
+                'name' => $bot->name,
+                'primary_color' => $bot->primary_color,
+                'is_active' => (bool) $bot->is_active,
+                'messages' => $messages,
+                'sessions' => $sessions,
+                'avg_messages_per_session' => $sessions > 0 ? round($messages / $sessions, 1) : 0,
+            ];
+        })->sortByDesc('messages')->values();
+
+        $messagesThisMonth = (int) $perBot->sum('messages');
+        $sessionsThisMonth = (int) $perBot->sum('sessions');
+        $avgMessagesPerSession = $sessionsThisMonth > 0 ? round($messagesThisMonth / $sessionsThisMonth, 1) : 0;
 
         return $this->json([
-            'bots' => Chatbot::query()
-                ->where('user_id', $user->id)
+            'messagesThisMonth' => $messagesThisMonth,
+            'sessionsThisMonth' => $sessionsThisMonth,
+            'avgMessagesPerSession' => $avgMessagesPerSession,
+            'daily' => $daily,
+            'perBot' => $perBot,
+        ]);
+    }
+
+    public function index(Request $request): JsonResponse
+    {
+        return $this->json([
+            'bots' => $this->visibleBotsQuery($request)
+                ->with('user:id,name,email')
                 ->orderByDesc('created_at')
-                ->get(),
+                ->get()
+                ->map(fn (Chatbot $bot) => $this->serializeBot($request, $bot)),
         ]);
     }
 
@@ -44,14 +129,23 @@ class ChatbotController extends Controller
             'name' => $data['name'],
         ]);
 
-        return $this->json(['bot' => $bot], 201);
+        return $this->json(['bot' => $this->serializeBot($request, $bot)], 201);
     }
 
     public function show(Request $request, Chatbot $chatbot): JsonResponse
     {
         $this->authorizeOwner($request, $chatbot);
 
-        return $this->json(['bot' => $chatbot]);
+        return $this->json(['bot' => $this->serializeBot($request, $chatbot)]);
+    }
+
+    public function playgroundChat(Request $request, Chatbot $chatbot, PublicChatController $publicChatController): JsonResponse
+    {
+        $this->authorizeOwner($request, $chatbot);
+
+        $data = $publicChatController->validateChatPayload($request, false);
+
+        return $publicChatController->handleChat($request, $chatbot, $data, 'playground');
     }
 
     public function update(Request $request, Chatbot $chatbot): JsonResponse
@@ -69,8 +163,25 @@ class ChatbotController extends Controller
             'collect_email' => ['sometimes', 'boolean'],
             'allowed_domains' => ['sometimes', 'array', 'min:1', 'max:20'],
             'allowed_domains.*' => ['required', 'string', 'max:253'],
+            'public_rate_limit_per_minute' => ['sometimes', 'integer', 'min:0', 'max:10000'],
+            'widget_cache_minutes' => ['sometimes', 'integer', 'min:0', 'max:10080'],
+            'regenerate_public_key' => ['sometimes', 'boolean'],
             'is_active' => ['sometimes', 'boolean'],
         ]);
+
+        if (! Chatbot::supportsPublicRateLimit()) {
+            unset($data['public_rate_limit_per_minute']);
+        }
+
+        if (! Chatbot::supportsWidgetCacheMinutes()) {
+            unset($data['widget_cache_minutes']);
+        }
+
+        if (! empty($data['regenerate_public_key']) && Chatbot::supportsPublicKey()) {
+            $data['public_key'] = 'pbk_' . Str::random(48);
+        }
+
+        unset($data['regenerate_public_key']);
 
         if (array_key_exists('allowed_domains', $data)) {
             $data['allowed_domains'] = collect($data['allowed_domains'])
@@ -85,15 +196,85 @@ class ChatbotController extends Controller
 
         $chatbot->update($data);
 
-        return $this->json(['bot' => $chatbot->fresh()]);
+        return $this->json(['bot' => $this->serializeBot($request, $chatbot->fresh())]);
     }
 
     public function destroy(Request $request, Chatbot $chatbot): JsonResponse
     {
         $this->authorizeOwner($request, $chatbot);
+        $this->deleteChatbotLogoFile($chatbot);
         $chatbot->delete();
 
         return $this->json(['ok' => true]);
+    }
+
+    public function uploadLogo(Request $request, Chatbot $chatbot): JsonResponse
+    {
+        $this->authorizeOwner($request, $chatbot);
+
+        if (! Chatbot::supportsLogoUpload()) {
+            return $this->json([
+                'message' => 'Bot logo upload is not available until the latest database migration is applied.',
+            ], 503);
+        }
+
+        $data = $request->validate([
+            'file' => ['required', 'file', 'max:10240', 'mimetypes:image/jpeg,image/png,image/gif,image/webp'],
+        ]);
+
+        $file = $data['file'];
+        $extension = strtolower($file->getClientOriginalExtension() ?: $file->guessExtension() ?: 'bin');
+        $safeName = Str::slug(pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME)) ?: 'logo';
+        $storedName = $safeName . '-' . Str::random(8) . '.' . $extension;
+        $path = $file->storeAs("bot-logos/{$chatbot->user_id}/{$chatbot->id}", $storedName, 'public');
+        $oldPath = trim((string) $chatbot->logo_path);
+
+        try {
+            DB::transaction(function () use ($chatbot, $path, $file) {
+                $chatbot->update([
+                    'logo_path' => $path,
+                    'logo_original_name' => $file->getClientOriginalName(),
+                ]);
+            });
+        } catch (\Throwable $e) {
+            if (Storage::disk('public')->exists($path)) {
+                Storage::disk('public')->delete($path);
+            }
+
+            throw $e;
+        }
+
+        if ($oldPath !== '' && $oldPath !== $path) {
+            $this->deletePublicFile($oldPath);
+        }
+
+        return $this->json(['bot' => $this->serializeBot($request, $chatbot->fresh())]);
+    }
+
+    public function deleteLogo(Request $request, Chatbot $chatbot): JsonResponse
+    {
+        $this->authorizeOwner($request, $chatbot);
+
+        if (! Chatbot::supportsLogoUpload()) {
+            return $this->json([
+                'message' => 'Bot logo upload is not available until the latest database migration is applied.',
+            ], 503);
+        }
+
+        $oldPath = trim((string) $chatbot->logo_path);
+
+        DB::transaction(function () use ($chatbot) {
+            $chatbot->update([
+                'logo_path' => null,
+                'logo_original_name' => null,
+            ]);
+        });
+
+        if ($oldPath !== '') {
+            $this->deletePublicFile($oldPath);
+        }
+
+        return $this->json(['bot' => $this->serializeBot($request, $chatbot->fresh())]);
     }
 
     public function sources(Request $request, Chatbot $chatbot): JsonResponse
@@ -131,11 +312,18 @@ class ChatbotController extends Controller
         $response = Http::timeout(30)->get($data['url']);
         abort_unless($response->ok(), 422, 'Could not fetch URL.');
 
-        $title = Str::of($response->body())->match('/<title[^>]*>(.*?)<\/title>/is')->trim()->limit(200);
-        $text = trim(preg_replace('/\s+/', ' ', strip_tags($response->body())));
+        $body = $this->sanitizeUtf8($response->body());
+        $title = Str::of($body)->match('/<title[^>]*>(.*?)<\/title>/is')->trim()->limit(200);
+        $text = $this->normalizeImportedText(strip_tags($body));
         abort_unless(strlen($text) >= 20, 422, 'No extractable text found.');
 
-        return $this->json($this->storeKnowledge($chatbot, 'url', (string) ($title ?: $data['url']), $text, $data['url']));
+        return $this->json($this->storeKnowledge(
+            $chatbot,
+            'url',
+            $this->sanitizeUtf8((string) ($title ?: $data['url'])),
+            $text,
+            $this->sanitizeUtf8($data['url']),
+        ));
     }
 
     public function ingestFile(Request $request, Chatbot $chatbot): JsonResponse
@@ -172,9 +360,7 @@ class ChatbotController extends Controller
 
     public function destroySource(Request $request, KnowledgeSource $source): JsonResponse
     {
-        $user = $request->attributes->get('auth_user');
-
-        abort_unless($source->user_id === $user->id, 404);
+        $this->authorizeUserResource($request, $source->user_id);
         $source->delete();
 
         return $this->json(['ok' => true]);
@@ -182,9 +368,7 @@ class ChatbotController extends Controller
 
     public function downloadSourceChunks(Request $request, KnowledgeSource $source): Response
     {
-        $user = $request->attributes->get('auth_user');
-
-        abort_unless($source->user_id === $user->id, 404);
+        $this->authorizeUserResource($request, $source->user_id);
 
         $chunks = DocumentChunk::query()
             ->where('source_id', $source->id)
@@ -239,9 +423,7 @@ class ChatbotController extends Controller
 
     public function messages(Request $request, Conversation $conversation): JsonResponse
     {
-        $user = $request->attributes->get('auth_user');
-
-        abort_unless($conversation->user_id === $user->id, 404);
+        $this->authorizeUserResource($request, $conversation->user_id);
 
         return $this->json([
             'messages' => Message::query()
@@ -285,9 +467,29 @@ class ChatbotController extends Controller
 
     private function authorizeOwner(Request $request, Chatbot $chatbot): void
     {
+        $this->authorizeUserResource($request, $chatbot->user_id);
+    }
+
+    private function authorizeUserResource(Request $request, string $ownerId): void
+    {
         $user = $request->attributes->get('auth_user');
 
-        abort_unless($chatbot->user_id === $user->id, 404);
+        abort_unless($user && ($ownerId === $user->id || $this->isAdmin($request)), 404);
+    }
+
+    private function visibleBotsQuery(Request $request)
+    {
+        $user = $request->attributes->get('auth_user');
+
+        return Chatbot::query()
+            ->when(! $this->isAdmin($request), fn ($query) => $query->where('user_id', $user->id));
+    }
+
+    private function isAdmin(Request $request): bool
+    {
+        $user = $request->attributes->get('auth_user');
+
+        return $user && method_exists($user, 'isAdmin') && $user->isAdmin();
     }
 
     private function normalizeDomain(string $value): ?string
@@ -318,6 +520,11 @@ class ChatbotController extends Controller
         ?int $sizeBytes = null,
     ): array
     {
+        $name = $this->sanitizeUtf8($name);
+        $text = $this->normalizeImportedText($text);
+        $url = $url !== null ? $this->sanitizeUtf8($url) : null;
+        $storagePath = $storagePath !== null ? $this->sanitizeUtf8($storagePath) : null;
+
         $source = KnowledgeSource::create([
             'chatbot_id' => $chatbot->id,
             'user_id' => $chatbot->user_id,
@@ -338,7 +545,7 @@ class ChatbotController extends Controller
                     'source_id' => $source->id,
                     'chatbot_id' => $chatbot->id,
                     'user_id' => $chatbot->user_id,
-                    'content' => $chunk,
+                    'content' => $this->sanitizeUtf8($chunk),
                     'chunk_index' => $index,
                 ]);
             }
@@ -347,14 +554,17 @@ class ChatbotController extends Controller
 
             return ['sourceId' => $source->id, 'chunks' => count($chunks)];
         } catch (\Throwable $e) {
-            $source->update(['status' => 'error', 'error_message' => $e->getMessage()]);
+            $source->update([
+                'status' => 'error',
+                'error_message' => Str::limit($this->sanitizeUtf8($e->getMessage()), 1000),
+            ]);
             throw $e;
         }
     }
 
     private function chunkText(string $text): array
     {
-        $clean = trim(preg_replace('/\s+/', ' ', $text));
+        $clean = $this->normalizeImportedText($text);
         $chunks = [];
         $size = 1000;
         $overlap = 150;
@@ -385,6 +595,39 @@ class ChatbotController extends Controller
         }
 
         return $chunks;
+    }
+
+    private function sanitizeUtf8(?string $value): string
+    {
+        $value = (string) ($value ?? '');
+
+        if ($value === '') {
+            return '';
+        }
+
+        if (preg_match('//u', $value) === 1) {
+            return mb_scrub($value, 'UTF-8');
+        }
+
+        $converted = @iconv('Windows-1252', 'UTF-8//IGNORE', $value);
+        if (is_string($converted) && preg_match('//u', $converted) === 1) {
+            return mb_scrub($converted, 'UTF-8');
+        }
+
+        $converted = @iconv('ISO-8859-1', 'UTF-8//IGNORE', $value);
+        if (is_string($converted) && preg_match('//u', $converted) === 1) {
+            return mb_scrub($converted, 'UTF-8');
+        }
+
+        return mb_scrub(mb_convert_encoding($value, 'UTF-8', 'UTF-8'), 'UTF-8');
+    }
+
+    private function normalizeImportedText(?string $value): string
+    {
+        $value = $this->sanitizeUtf8($value);
+        $value = preg_replace('/\s+/u', ' ', $value) ?? $value;
+
+        return trim($value);
     }
 
     private function extractFileText(string $path, string $extension): string
@@ -439,9 +682,53 @@ class ChatbotController extends Controller
         return implode(' ', $parts);
     }
 
+    private function serializeBot(Request $request, Chatbot $bot): array
+    {
+        $data = $bot->toArray();
+        $data['logo_url'] = Chatbot::supportsLogoUpload()
+            ? $this->resolvePublicFileUrl($request, $bot->logo_path)
+            : null;
+        $data['owner'] = $bot->relationLoaded('user') && $bot->user
+            ? [
+                'id' => $bot->user->id,
+                'name' => $bot->user->name,
+                'email' => $bot->user->email,
+            ]
+            : null;
+
+        return $data;
+    }
+
+    private function resolvePublicFileUrl(Request $request, ?string $path): ?string
+    {
+        $path = trim((string) $path);
+        if ($path === '') {
+            return null;
+        }
+
+        $relativePath = '/storage/' . ltrim($path, '/');
+        $origin = $request->getSchemeAndHttpHost();
+
+        return rtrim($origin, '/') . $relativePath;
+    }
+
+    private function deleteChatbotLogoFile(Chatbot $chatbot): void
+    {
+        $path = trim((string) $chatbot->logo_path);
+        $this->deletePublicFile($path);
+    }
+
+    private function deletePublicFile(?string $path): void
+    {
+        $path = trim((string) $path);
+        if ($path !== '' && Storage::disk('public')->exists($path)) {
+            Storage::disk('public')->delete($path);
+        }
+    }
+
     private function json(array $data, int $status = 200): JsonResponse
     {
-        return response()->json($data, $status)->withHeaders([
+        return response()->json($data, $status, [], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE)->withHeaders([
             'Access-Control-Allow-Origin' => '*',
             'Access-Control-Allow-Headers' => 'Content-Type, Authorization, X-Requested-With',
             'Access-Control-Allow-Methods' => 'GET, POST, PUT, PATCH, DELETE, OPTIONS',

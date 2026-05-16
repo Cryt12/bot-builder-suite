@@ -16,12 +16,12 @@ function FeedbackPage() {
       <h1 className="font-display text-3xl font-bold mb-1 flex items-center gap-3">
         <MessageSquareHeart className="h-7 w-7" /> Feedback
       </h1>
-      <p className="text-sm text-muted-foreground mb-8">We'd love to hear how we can improve Tuqlas.</p>
+      <p className="text-sm text-muted-foreground mb-8">We'd love to hear how we can improve Helix.</p>
       <div className="rounded-2xl border border-border bg-gradient-card p-6 space-y-4">
         <Textarea
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder="What would make Tuqlas better for you?"
+          placeholder="What would make Helix better for you?"
           rows={6}
         />
         <Button

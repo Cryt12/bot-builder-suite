@@ -1,16 +1,16 @@
 // Scraping API routes for chatbot knowledge ingestion
-// Uses Laravel backend (PostgreSQL helix database) instead of Supabase
 
 import { Router, Request, Response } from "express";
 import { scrapeWebsite, scrapeSingleUrl, loadScrapingConfig } from "../scrape.server";
 import { chunkText } from "../ingest.server";
+import { getLaravelApiBaseFromEnv } from "../../lib/server-env";
 import * as fs from "fs/promises";
 import * as path from "path";
 
 const router = Router();
 
 // Laravel API base URL
-const LARAVEL_API = process.env.LARAVEL_API_URL || "http://localhost:8082/api";
+const LARAVEL_API = getLaravelApiBaseFromEnv();
 
 // Scrape request interface
 interface ScrapeRequest {

@@ -43,13 +43,22 @@ export async function laravelRequest<T>(
   });
 
   const text = await response.text();
-  const data = text ? JSON.parse(text) : null;
+  let data: any = null;
+
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = null;
+    }
+  }
 
   if (!response.ok) {
     const message =
       data?.message ||
       Object.values(data?.errors ?? {})?.flat()?.[0] ||
-      "Request failed";
+      (text && !text.trim().startsWith("<") ? text : null) ||
+      `Request failed with status ${response.status}`;
     throw new Error(String(message));
   }
 

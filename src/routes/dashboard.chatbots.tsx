@@ -1,10 +1,11 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
+import { useAuth } from "@/lib/auth-context";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
-import { Bot, Plus, MessageSquare, Database, Loader2 } from "lucide-react";
+import { Bot, Plus, MessageSquare, Database, Loader2, User } from "lucide-react";
 import { listBots, createBot } from "@/lib/bots-api";
 import { toast } from "sonner";
 
@@ -13,6 +14,7 @@ export const Route = createFileRoute("/dashboard/chatbots")({
 });
 
 function BotsList() {
+  const { user } = useAuth();
   const [bots, setBots] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [open, setOpen] = useState(false);
@@ -106,6 +108,14 @@ function BotsList() {
                 </span>
               </div>
               <h3 className="mt-4 font-semibold group-hover:text-primary transition-colors">{b.name}</h3>
+              {user?.role === "admin" && b.owner ? (
+                <div className="mt-2 inline-flex items-center gap-2 rounded-full border border-border bg-surface/70 px-2.5 py-1 text-[11px] text-muted-foreground">
+                  <User className="h-3 w-3 text-primary" />
+                  <span>
+                    Belongs to {b.owner.name || b.owner.email}
+                  </span>
+                </div>
+              ) : null}
               <div className="mt-4 flex items-center gap-4 text-xs text-muted-foreground">
                 <span className="flex items-center gap-1.5"><Database className="h-3.5 w-3.5" /> Knowledge</span>
                 <span className="flex items-center gap-1.5"><MessageSquare className="h-3.5 w-3.5" /> Chats</span>

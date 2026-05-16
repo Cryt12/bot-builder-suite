@@ -13,12 +13,12 @@ import { Switch } from "@/components/ui/switch";
 import {
   ArrowLeft, Bot, Check, Code2, Copy, Database, FileText, Globe, Loader2,
   MessageSquare, Plus, Send, Settings, Trash2, Upload, BarChart3, Sparkles, Download,
-  X,
+  X, Image as ImageIcon,
 } from "lucide-react";
 import {
-  getBot, updateBot, deleteBot, listSources, deleteSource,
+  getBot, updateBot, deleteBot, uploadBotLogo, deleteBotLogo, listSources, deleteSource,
   ingestUrl, ingestRawText, ingestFile, downloadSourceChunks,
-  listConversations, getMessages, getAnalytics,
+  listConversations, getMessages, getAnalytics, playgroundChat,
 } from "@/lib/bots-api";
 import { getLaravelOrigin } from "@/lib/laravel-api";
 import { toast } from "sonner";
@@ -55,12 +55,10 @@ function BotDetail() {
       </Link>
       <header className="flex items-start justify-between mb-8">
         <div className="flex items-start gap-4">
-          <div className="h-12 w-12 rounded-xl flex items-center justify-center shadow-glow" style={{ background: bot.primary_color }}>
-            <Bot className="h-6 w-6 text-white" />
-          </div>
+          <BotAvatar bot={bot} className="h-12 w-12 rounded-xl shadow-glow" iconClassName="h-6 w-6" />
           <div>
             <h1 className="font-display text-2xl font-bold">{bot.name}</h1>
-            <p className="text-sm text-muted-foreground mt-0.5 font-mono">{bot.api_key}</p>
+            <p className="text-sm text-muted-foreground mt-0.5 font-mono">{bot.public_key || "Public embed key not generated yet"}</p>
           </div>
         </div>
         <div className="flex items-center gap-3">
@@ -93,6 +91,35 @@ function BotDetail() {
         <TabsContent value="history" className="mt-6"><HistoryTab botId={id} /></TabsContent>
         <TabsContent value="settings" className="mt-6"><SettingsTab bot={bot} onChange={refresh} /></TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+function BotAvatar({
+  bot,
+  className = "h-12 w-12 rounded-xl",
+  iconClassName = "h-6 w-6",
+}: {
+  bot: any;
+  className?: string;
+  iconClassName?: string;
+}) {
+  const logoUrl = bot?.logo_url;
+
+  return (
+    <div
+      className={`${className} overflow-hidden flex items-center justify-center shrink-0`}
+      style={{ background: logoUrl ? "transparent" : (bot?.primary_color || "#00b0f0") }}
+    >
+      {logoUrl ? (
+        <img
+          src={logoUrl}
+          alt={`${bot?.name || "Bot"} logo`}
+          className="h-full w-full object-contain"
+        />
+      ) : (
+        <Bot className={`${iconClassName} text-white`} />
+      )}
     </div>
   );
 }
@@ -259,18 +286,16 @@ function PlaygroundTab({ bot }: { bot: any }) {
     setInput(""); setSending(true);
     setMessages((m) => [...m, { role: "user", content: msg }]);
     try {
-      const r = await fetch("/api/public/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          apiKey: bot.api_key, message: msg, conversationId: convId,
+      const response = await playgroundChat({
+        data: {
+          chatbotId: bot.id,
+          message: msg,
+          conversationId: convId,
           history: messages.slice(-10),
-        }),
+        },
       });
-      const j = await r.json();
-      if (!r.ok) throw new Error(j.error);
-      setConvId(j.conversationId);
-      setMessages((m) => [...m, { role: "assistant", content: j.reply }]);
+      setConvId(response.conversationId);
+      setMessages((m) => [...m, { role: "assistant", content: response.reply }]);
     } catch (e: any) {
       setMessages((m) => [...m, { role: "assistant", content: "⚠ " + e.message }]);
     } finally { setSending(false); }
@@ -291,9 +316,9 @@ function PlaygroundTab({ bot }: { bot: any }) {
         ))}
         {sending && (
           <div className="bg-surface border border-border rounded-2xl rounded-tl-sm px-4 py-3 max-w-[80%] flex gap-1.5">
-            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground animate-bounce" />
-            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground animate-bounce [animation-delay:0.15s]" />
-            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground animate-bounce [animation-delay:0.3s]" />
+            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground" />
+            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground" />
+            <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground" />
           </div>
         )}
       </div>
@@ -325,8 +350,15 @@ function EmbedTab({ bot, onChange }: { bot: any; onChange: () => void }) {
   const [domains, setDomains] = useState<string[]>(bot.allowed_domains ?? []);
   const [domainInput, setDomainInput] = useState("");
   const [savingDomains, setSavingDomains] = useState(false);
-  const widgetOrigin = getLaravelOrigin() || "http://127.0.0.1:8082";
-  const snippet = `<script src="${widgetOrigin}/api/public/widget.js" data-api-key="${bot.api_key}" defer></script>`;
+  const [rateLimit, setRateLimit] = useState<number>(bot.public_rate_limit_per_minute ?? 60);
+  const [cacheMinutes, setCacheMinutes] = useState<number>(bot.widget_cache_minutes ?? 10);
+  const [regeneratingPublicKey, setRegeneratingPublicKey] = useState(false);
+  const widgetOrigin = getLaravelOrigin();
+  const widgetVersion = "20260513-session-cache";
+  const publicEmbedKey = bot.public_key || "";
+  const snippet = publicEmbedKey
+    ? `<script src="${widgetOrigin}/api/public/widget.js?v=${widgetVersion}" data-public-key="${publicEmbedKey}" data-origin="${widgetOrigin}" data-cache-minutes="${cacheMinutes}" defer></script>`
+    : "Public embed key is not available yet. Run the latest backend migration, then refresh this page.";
   const apiCurl = `curl -X POST ${widgetOrigin}/api/public/chat \\
   -H "Content-Type: application/json" \\
   -d '{"apiKey":"${bot.api_key}","message":"Hello"}'`;
@@ -334,7 +366,9 @@ function EmbedTab({ bot, onChange }: { bot: any; onChange: () => void }) {
   useEffect(() => {
     setDomains(bot.allowed_domains ?? []);
     setDomainInput("");
-  }, [bot.id, bot.allowed_domains]);
+    setRateLimit(bot.public_rate_limit_per_minute ?? 60);
+    setCacheMinutes(bot.widget_cache_minutes ?? 10);
+  }, [bot.id, bot.allowed_domains, bot.public_rate_limit_per_minute, bot.widget_cache_minutes]);
 
   function copy(text: string, k: string) {
     navigator.clipboard.writeText(text);
@@ -378,6 +412,58 @@ function EmbedTab({ bot, onChange }: { bot: any; onChange: () => void }) {
     }
   }
 
+  async function saveProtection() {
+    const pending = normalizeDomain(domainInput);
+    const nextDomains = pending && !domains.includes(pending)
+      ? [...domains, pending]
+      : domains;
+
+    if (nextDomains.length === 0) {
+      toast.error("At least one domain is required");
+      return;
+    }
+
+    const normalizedRateLimit = Number.isFinite(rateLimit) ? Math.max(0, Math.min(10000, Math.floor(rateLimit))) : 60;
+    const normalizedCacheMinutes = Number.isFinite(cacheMinutes) ? Math.max(0, Math.min(10080, Math.floor(cacheMinutes))) : 10;
+
+    setSavingDomains(true);
+    try {
+      const response = await updateBot({
+        data: {
+          id: bot.id,
+          allowed_domains: nextDomains,
+          public_rate_limit_per_minute: normalizedRateLimit,
+          widget_cache_minutes: normalizedCacheMinutes,
+        },
+      });
+      setDomains(response.bot.allowed_domains ?? nextDomains);
+      setRateLimit(response.bot.public_rate_limit_per_minute ?? normalizedRateLimit);
+      setCacheMinutes(response.bot.widget_cache_minutes ?? normalizedCacheMinutes);
+      setDomainInput("");
+      toast.success("Embed protection saved");
+      onChange();
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setSavingDomains(false);
+    }
+  }
+
+  async function regeneratePublicKey() {
+    if (!confirm("Regenerate the public embed key? Existing website embeds will stop working until updated.")) return;
+
+    setRegeneratingPublicKey(true);
+    try {
+      await updateBot({ data: { id: bot.id, regenerate_public_key: true } });
+      toast.success("Public embed key regenerated");
+      onChange();
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setRegeneratingPublicKey(false);
+    }
+  }
+
   return (
     <div className="space-y-6 max-w-3xl">
       <div className="rounded-xl border border-border bg-gradient-card p-6">
@@ -412,25 +498,66 @@ function EmbedTab({ bot, onChange }: { bot: any; onChange: () => void }) {
             ))}
           </div>
         )}
-        <Button onClick={saveDomains} disabled={savingDomains || domains.length === 0} className="mt-4 bg-gradient-primary text-primary-foreground">
-          {savingDomains ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save domains"}
+        <div className="mt-5 space-y-2">
+          <Label htmlFor="public-rate-limit">Public chat rate limit per minute</Label>
+          <Input
+            id="public-rate-limit"
+            type="number"
+            min={0}
+            max={10000}
+            value={rateLimit}
+            onChange={(e) => setRateLimit(Number(e.target.value || 0))}
+          />
+          <p className="text-xs text-muted-foreground">Applies to both the visitor IP and the widget visitor ID. Set to 0 to disable rate limiting.</p>
+        </div>
+        <div className="mt-5 space-y-2">
+          <Label htmlFor="widget-cache-minutes">Conversation cache time in browser</Label>
+          <Input
+            id="widget-cache-minutes"
+            type="number"
+            min={0}
+            max={10080}
+            value={cacheMinutes}
+            onChange={(e) => setCacheMinutes(Number(e.target.value || 0))}
+          />
+          <p className="text-xs text-muted-foreground">Keeps the same conversation on the same browser/device across page refreshes for this many minutes. Set to 0 to disable chat caching.</p>
+        </div>
+        <Button onClick={saveProtection} disabled={savingDomains || domains.length === 0} className="mt-4 bg-gradient-primary text-primary-foreground">
+          {savingDomains ? <Loader2 className="h-4 w-4 animate-spin" /> : "Save embed protection"}
         </Button>
       </div>
 
       <div className="rounded-xl border border-border bg-gradient-card p-6">
+        <h3 className="font-semibold mb-1">Public embed key</h3>
+        <p className="text-sm text-muted-foreground mb-4">Use this public key only in the website widget script. It is protected by allowed domains and public rate limiting.</p>
+        {!publicEmbedKey && (
+          <p className="text-sm text-amber-600 mb-4">Public embed key not found for this bot yet. Run the latest backend migration and refresh, then regenerate the public key if needed.</p>
+        )}
+        <div className="flex items-center gap-2">
+          <code className="flex-1 rounded-lg border border-border bg-background p-3 text-sm font-mono">{publicEmbedKey || "Unavailable"}</code>
+          <Button variant="outline" onClick={() => publicEmbedKey && copy(publicEmbedKey, "public-key")} className="bg-surface" disabled={!publicEmbedKey}>
+            {copied === "public-key" ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+          </Button>
+          <Button variant="outline" onClick={regeneratePublicKey} disabled={regeneratingPublicKey} className="bg-surface">
+            {regeneratingPublicKey ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Regenerate"}
+          </Button>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-border bg-gradient-card p-6">
         <h3 className="font-semibold mb-1 flex items-center gap-2"><Code2 className="h-4 w-4 text-primary" /> Embed snippet</h3>
-        <p className="text-sm text-muted-foreground mb-4">Paste this into your site's HTML, just before <code className="text-xs bg-surface px-1.5 py-0.5 rounded">&lt;/body&gt;</code>.</p>
+        <p className="text-sm text-muted-foreground mb-4">Paste this into your site's HTML, just before <code className="text-xs bg-surface px-1.5 py-0.5 rounded">&lt;/body&gt;</code>. The snippet includes the current browser cache duration from this Embed tab.</p>
         <div className="relative">
           <pre className="rounded-lg border border-border bg-background p-4 text-xs font-mono overflow-x-auto">{snippet}</pre>
-          <Button size="sm" variant="outline" onClick={() => copy(snippet, "embed")} className="absolute top-2 right-2 bg-surface">
+          <Button size="sm" variant="outline" onClick={() => publicEmbedKey && copy(snippet, "embed")} className="absolute top-2 right-2 bg-surface" disabled={!publicEmbedKey}>
             {copied === "embed" ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
           </Button>
         </div>
       </div>
 
       <div className="rounded-xl border border-border bg-gradient-card p-6">
-        <h3 className="font-semibold mb-1">API key</h3>
-        <p className="text-sm text-muted-foreground mb-4">Use this to call the chat API directly from your own backend.</p>
+        <h3 className="font-semibold mb-1">Private API key</h3>
+        <p className="text-sm text-muted-foreground mb-4">Keep this private. Do not put it in browser HTML or public JavaScript.</p>
         <div className="flex items-center gap-2">
           <code className="flex-1 rounded-lg border border-border bg-background p-3 text-sm font-mono">{bot.api_key}</code>
           <Button variant="outline" onClick={() => copy(bot.api_key, "key")} className="bg-surface">
@@ -533,6 +660,7 @@ function HistoryTab({ botId }: { botId: string }) {
 // ---------- Settings ----------
 function SettingsTab({ bot, onChange }: { bot: any; onChange: () => void }) {
   const navigate = useNavigate();
+  const fileRef = useRef<HTMLInputElement>(null);
   const [form, setForm] = useState({
     name: bot.name,
     welcome_message: bot.welcome_message,
@@ -544,6 +672,7 @@ function SettingsTab({ bot, onChange }: { bot: any; onChange: () => void }) {
     allowed_domains: bot.allowed_domains ?? [],
   });
   const [saving, setSaving] = useState(false);
+  const [logoBusy, setLogoBusy] = useState(false);
 
   async function save() {
     setSaving(true);
@@ -556,6 +685,50 @@ function SettingsTab({ bot, onChange }: { bot: any; onChange: () => void }) {
     if (!confirm(`Permanently delete "${bot.name}"? This cannot be undone.`)) return;
     try { await deleteBot({ data: { id: bot.id } }); toast.success("Bot deleted"); navigate({ to: "/dashboard" }); }
     catch (e: any) { toast.error(e.message); }
+  }
+
+  async function handleLogoChange(file: File | null) {
+    if (!file) return;
+    const type = file.type.toLowerCase();
+    const allowed = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+    if (!allowed.includes(type)) {
+      toast.error("Use JPG, PNG, WEBP, or GIF");
+      if (fileRef.current) fileRef.current.value = "";
+      return;
+    }
+
+    if (file.size > 10 * 1024 * 1024) {
+      toast.error("Logo file is too large. Max 10MB.");
+      if (fileRef.current) fileRef.current.value = "";
+      return;
+    }
+
+    setLogoBusy(true);
+    try {
+      await uploadBotLogo({ data: { chatbotId: bot.id, file } });
+      toast.success("Bot logo updated");
+      onChange();
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setLogoBusy(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }
+
+  async function removeLogo() {
+    if (!bot.logo_url) return;
+    setLogoBusy(true);
+    try {
+      await deleteBotLogo({ data: { chatbotId: bot.id } });
+      toast.success("Bot logo removed");
+      onChange();
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setLogoBusy(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
   }
 
   return (
@@ -573,6 +746,51 @@ function SettingsTab({ bot, onChange }: { bot: any; onChange: () => void }) {
 
       <div className="rounded-xl border border-border bg-gradient-card p-6 space-y-4">
         <h3 className="font-semibold">Appearance</h3>
+        <div className="rounded-lg border border-border p-4">
+          <div className="flex items-start gap-4">
+            <div className="flex flex-col items-center gap-3 shrink-0">
+              <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Bubble</div>
+              <BotAvatar bot={bot} className="h-16 w-16 rounded-2xl shadow-glow" iconClassName="h-8 w-8" />
+              {bot.logo_url && (
+                <>
+                  <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Raw file</div>
+                  <div className="h-20 w-20 rounded-xl border border-border bg-background/70 p-2 flex items-center justify-center overflow-hidden">
+                    <img
+                      src={bot.logo_url}
+                      alt={`${bot.name} raw logo preview`}
+                      className="max-h-full max-w-full object-contain"
+                    />
+                  </div>
+                </>
+              )}
+            </div>
+            <div className="flex-1 space-y-3">
+              <div>
+                <Label htmlFor="bot-logo">Bot logo</Label>
+                <p className="text-xs text-muted-foreground mt-1">Upload JPG, PNG, WEBP, or animated GIF. The bubble preview shows the final circular fit, while Raw file shows the uploaded asset without circle masking.</p>
+              </div>
+              <input
+                ref={fileRef}
+                id="bot-logo"
+                type="file"
+                accept="image/jpeg,image/png,image/webp,image/gif"
+                className="hidden"
+                onChange={(e) => handleLogoChange(e.target.files?.[0] ?? null)}
+              />
+              <div className="flex flex-wrap gap-2">
+                <Button type="button" variant="outline" className="bg-surface" disabled={logoBusy} onClick={() => fileRef.current?.click()}>
+                  {logoBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <ImageIcon className="h-4 w-4 mr-2" />}
+                  {bot.logo_url ? "Replace logo" : "Upload logo"}
+                </Button>
+                {bot.logo_url && (
+                  <Button type="button" variant="outline" className="bg-surface text-destructive hover:bg-destructive/10 border-destructive/30" disabled={logoBusy} onClick={removeLogo}>
+                    <Trash2 className="h-4 w-4 mr-2" /> Remove logo
+                  </Button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
         <div className="grid sm:grid-cols-2 gap-4">
           <div className="space-y-1.5">
             <Label>Primary color</Label>

@@ -39,6 +39,24 @@ export async function deleteBot({ data }: FnArgs<{ id: string }>) {
   });
 }
 
+export async function uploadBotLogo({ data }: FnArgs<{ chatbotId: string; file: File }>) {
+  const body = new FormData();
+  body.set("file", data.file);
+
+  return laravelRequest<{ bot: any }>(`/chatbots/${data.chatbotId}/logo`, {
+    method: "POST",
+    token: token(),
+    body,
+  });
+}
+
+export async function deleteBotLogo({ data }: FnArgs<{ chatbotId: string }>) {
+  return laravelRequest<{ bot: any }>(`/chatbots/${data.chatbotId}/logo`, {
+    method: "DELETE",
+    token: token(),
+  });
+}
+
 export async function listSources({ data }: FnArgs<{ chatbotId: string }>) {
   return laravelRequest<{ sources: any[] }>(`/chatbots/${data.chatbotId}/sources`, { token: token() });
 }
@@ -132,9 +150,69 @@ export async function getMessages({ data }: FnArgs<{ conversationId: string }>) 
   return laravelRequest<{ messages: any[] }>(`/conversations/${data.conversationId}/messages`, { token: token() });
 }
 
+export async function playgroundChat({
+  data,
+}: FnArgs<{
+  chatbotId: string;
+  message: string;
+  conversationId?: string;
+  history?: Array<{ role: "user" | "assistant"; content: string }>;
+}>) {
+  const { chatbotId, ...payload } = data;
+
+  return laravelRequest<{ reply: string; conversationId: string }>(`/chatbots/${chatbotId}/playground-chat`, {
+    method: "POST",
+    token: token(),
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function getAnalytics({ data }: FnArgs<{ chatbotId: string }>) {
   return laravelRequest<{ conversations30d: number; messages30d: number; daily: any[] }>(
     `/chatbots/${data.chatbotId}/analytics`,
     { token: token() },
   );
+}
+
+export async function getDashboardAnalytics() {
+  return laravelRequest<{
+    messagesThisMonth: number;
+    sessionsThisMonth: number;
+    avgMessagesPerSession: number;
+    daily: Array<{ date: string; messages: number }>;
+    perBot: Array<{
+      id: string;
+      name: string;
+      primary_color: string | null;
+      is_active: boolean;
+      messages: number;
+      sessions: number;
+      avg_messages_per_session: number;
+    }>;
+  }>("/analytics", { token: token() });
+}
+
+export async function listAdminUsers() {
+  return laravelRequest<{
+    summary: {
+      users: number;
+      admins: number;
+      chatbots: number;
+    };
+    users: Array<{
+      id: string;
+      name: string | null;
+      email: string;
+      role: string;
+      chatbots_count: number;
+      created_at: string | null;
+      chatbots: Array<{
+        id: string;
+        name: string;
+        primary_color: string | null;
+        is_active: boolean;
+        created_at: string | null;
+      }>;
+    }>;
+  }>("/admin/users", { token: token() });
 }

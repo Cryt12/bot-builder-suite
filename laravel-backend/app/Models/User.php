@@ -85,4 +85,9 @@ class User extends Authenticatable
     {
         return $this->hasMany(ApiToken::class);
     }
+
+    public function isAdmin(): bool
+    {
+        return $this->role === 'admin';
+    }
 }

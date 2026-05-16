@@ -3,6 +3,7 @@ import { Toaster } from "sonner";
 import { AuthProvider } from "@/lib/auth-context";
 
 import appCss from "../styles.css?url";
+import helixLogo from "../../helix logo.png";
 
 function NotFoundComponent() {
   return (
@@ -35,20 +36,22 @@ export const Route = createRootRoute({
       {
         name: "description",
         content:
-          "Build, train and deploy AI chatbots from your docs and websites in minutes. Embed anywhere with one line of code.",
+          "Build, train and deploy AI chatbots from your docs and websites in just seconds. Embed anywhere with one line of code.",
       },
       { name: "author", content: "Helix" },
       { property: "og:title", content: "Helix — AI Chatbots Trained on Your Data" },
       {
         property: "og:description",
         content:
-          "Build, train and deploy AI chatbots from your docs and websites in minutes.",
+          "Build, train and deploy AI chatbots from your docs and websites in just seconds.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
     ],
     links: [
       { rel: "stylesheet", href: appCss },
+      { rel: "icon", type: "image/png", href: helixLogo },
+      { rel: "apple-touch-icon", href: helixLogo },
       {
         rel: "preconnect",
         href: "https://fonts.googleapis.com",

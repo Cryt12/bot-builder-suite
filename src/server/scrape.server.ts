@@ -573,26 +573,6 @@ export async function ingestScrapedContent(
 
     chunksCreated += chunks.length;
 
-    // In production, this would be:
-    // const source = await supabaseAdmin.from("knowledge_sources").insert({
-    //   chatbot_id: chatbotId,
-    //   user_id: userId,
-    //   source_type: "scraped_url",
-    //   name: entry.name,
-    //   url: entry.url,
-    //   status: "ready",
-    //   chunk_count: chunks.length,
-    // }).select("id").single();
-    //
-    // for (let i = 0; i < chunks.length; i++) {
-    //   await supabaseAdmin.from("document_chunks").insert({
-    //     source_id: source.id,
-    //     chatbot_id: chatbotId,
-    //     user_id: userId,
-    //     content: chunks[i],
-    //     chunk_index: i,
-    //   });
-    // }
   }
 
   return {

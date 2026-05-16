@@ -1,7 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { getLaravelApiBaseFromEnv } from "../lib/server-env";
 
 const cors = { "Access-Control-Allow-Origin": "*" };
-const API_BASE = process.env.LARAVEL_API_URL ?? "http://127.0.0.1:8082/api";
+const API_BASE = getLaravelApiBaseFromEnv();
 
 export const Route = createFileRoute("/api/public/bot/$apiKey")({
   server: {
@@ -16,7 +17,21 @@ export const Route = createFileRoute("/api/public/bot/$apiKey")({
           },
         });
 
-        return new Response(await response.text(), {
+        const text = await response.text();
+        let body = text;
+
+        try {
+          const parsed = text ? JSON.parse(text) : null;
+          if (parsed && parsed.logo_url) {
+            const requestUrl = new URL(request.url);
+            parsed.logo_url = `${requestUrl.protocol}//${requestUrl.host}/api/public/logo/${params.apiKey}`;
+            body = JSON.stringify(parsed);
+          }
+        } catch {
+          body = text;
+        }
+
+        return new Response(body, {
           status: response.status,
           headers: { ...cors, "Content-Type": "application/json", "Cache-Control": "public, max-age=60" },
         });
@@ -24,3 +39,4 @@ export const Route = createFileRoute("/api/public/bot/$apiKey")({
     },
   },
 });
+
