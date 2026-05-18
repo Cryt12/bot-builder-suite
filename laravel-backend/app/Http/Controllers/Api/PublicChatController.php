@@ -616,7 +616,7 @@ class PublicChatController extends Controller
   var EMBED_CACHE_MINUTES = parseCacheMinutes(explicitCacheMinutes);
 
   var closeTimer = null;
-  var state = { open: false, closing: false, conversationId: null, messages: [], sending: false, bot: null, pageContext: null, lastPageSignature: '', pageReadLabel: 'Scanning page...', draftMessage: '', draftEmail: '', activeField: null };
+  var state = { open: false, closing: false, conversationId: null, messages: [], sending: false, bot: null, pageContext: null, lastPageSignature: '', pageReadLabel: 'Scanning page...', draftMessage: '', draftEmail: '', activeField: null, headerCompact: false, panelAnimatedIn: false };
   restoreSession();
 
   fetch(ORIGIN + '/api/public/bot/' + publicKey).then(function(r){return r.json();}).then(function(b){
@@ -638,23 +638,48 @@ class PublicChatController extends Controller
   var style = document.createElement('style');
   style.textContent = [
     '#helix-widget-root *{box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}',
-    '.helix-bubble{position:fixed;bottom:20px;z-index:2147483646;width:56px;height:56px;border-radius:50%;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;color:#fff;box-shadow:0 8px 24px rgba(0,0,0,0.18);transition:transform .24s ease,box-shadow .24s ease;overflow:hidden;padding:0}',
-    '.helix-bubble:hover{transform:scale(1.06)}',
-    '.helix-bubble.is-active{transform:scale(.96) rotate(-8deg);box-shadow:0 14px 34px rgba(0,0,0,0.22)}',
-    '.helix-bubble img{width:100%;height:100%;object-fit:contain;display:block;border-radius:inherit;background:transparent}',
+    '.helix-bubble{position:fixed;bottom:20px;z-index:2147483646;width:60px;height:60px;border-radius:20px;border:1px solid rgba(255,255,255,0.18);cursor:pointer;display:flex;align-items:center;justify-content:center;color:#fff;box-shadow:0 18px 44px rgba(15,23,42,0.28);transition:transform .24s ease,box-shadow .24s ease,border-radius .24s ease;overflow:hidden;padding:0;backdrop-filter:blur(18px)}',
+    '.helix-bubble:hover{transform:translateY(-2px) scale(1.03)}',
+    '.helix-bubble.is-active{transform:scale(.96);border-radius:18px;box-shadow:0 24px 48px rgba(15,23,42,0.32)}',
+    '.helix-bubble img{width:100%;height:100%;object-fit:cover;display:block;border-radius:inherit;background:transparent}',
     '.helix-bubble svg{width:26px;height:26px}',
-    '.helix-panel{position:fixed;bottom:90px;z-index:2147483647;width:380px;max-width:calc(100vw - 24px);height:560px;max-height:calc(100vh - 120px);background:#fff;border-radius:16px;box-shadow:0 20px 60px rgba(0,0,0,0.25);display:flex;flex-direction:column;overflow:hidden;font-size:14px;color:#0f172a}',
+    '.helix-panel{position:fixed;bottom:96px;z-index:2147483647;width:390px;max-width:calc(100vw - 24px);height:620px;max-height:calc(100vh - 124px);background:#f8fafc;border-radius:28px;box-shadow:0 34px 80px rgba(15,23,42,0.30);display:flex;flex-direction:column;overflow:hidden;font-size:14px;color:#0f172a;border:1px solid rgba(148,163,184,0.18);transform-origin:calc(100% - 28px) calc(100% - 20px)}',
     '.helix-panel[data-side="right"]{right:20px}',
     '.helix-panel[data-side="left"]{left:20px}',
-    '.helix-panel.is-closing{display:none}',
-    '.helix-header{padding:14px 16px;color:#fff;display:flex;align-items:center;justify-content:space-between;font-weight:600}',
-    '.helix-close{background:transparent;border:none;color:#fff;cursor:pointer;font-size:20px;line-height:1;padding:4px 8px;border-radius:6px}',
-    '.helix-close:hover{background:rgba(255,255,255,.15)}',
-    '.helix-page-status{padding:8px 16px;border-bottom:1px solid #e2e8f0;background:#f8fafc;font-size:12px;color:#475569}',
-    '.helix-body{flex:1;overflow-y:auto;padding:16px;background:#f8fafc;display:flex;flex-direction:column;gap:8px}',
-    '.helix-msg{max-width:85%;padding:12px 16px;border-radius:14px;line-height:1.6;word-wrap:break-word;text-align:left}',
-    '.helix-msg.bot{background:#fff;border:1px solid #e2e8f0;align-self:flex-start;border-top-left-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,0.04)}',
-    '.helix-msg.user{color:#fff;align-self:flex-end;border-top-right-radius:4px}',
+    '.helix-panel.is-opening{animation:helixPanelIn .34s cubic-bezier(.22,1,.36,1) both}',
+    '.helix-panel.is-closing{pointer-events:none;animation:helixPanelOut .24s cubic-bezier(.4,0,1,1) both}',
+    '.helix-panel.is-compact .helix-header{padding:8px 12px 5px;gap:4px}',
+    '.helix-panel.is-compact .helix-header-copy,.helix-panel.is-compact .helix-page-status{opacity:0;max-height:0;transform:translateY(-12px);pointer-events:none;margin:0;padding-top:0;padding-bottom:0;overflow:hidden}',
+    '.helix-panel.is-compact .helix-brand{align-items:center}',
+    '.helix-panel.is-compact .helix-brand-logo{width:40px;height:40px;border-radius:11px}',
+    '.helix-panel.is-compact .helix-brand-copy{padding-top:0}',
+    '.helix-panel.is-compact .helix-brand-label{margin-bottom:1px;font-size:12px}',
+    '.helix-panel.is-compact .helix-brand-name{font-size:20px}',
+    '.helix-header{position:relative;padding:10px 12px 12px;color:#fff;display:flex;flex-direction:column;gap:8px;overflow:hidden;transition:padding .22s ease,gap .22s ease}',
+    '.helix-header::before{content:"";position:absolute;inset:-18% auto auto -16%;width:180px;height:180px;border-radius:999px;background:rgba(255,255,255,0.20);filter:blur(10px)}',
+    '.helix-header::after{content:"";position:absolute;right:-56px;top:22px;width:180px;height:180px;border-radius:999px;background:rgba(255,255,255,0.14);filter:blur(24px)}',
+    '.helix-header-top,.helix-header-copy,.helix-page-status,.helix-header-actions{position:relative;z-index:1}',
+    '.helix-header-top{display:flex;align-items:center;justify-content:space-between;gap:8px}',
+    '.helix-brand{display:flex;align-items:center;gap:8px;min-width:0;flex:1}',
+    '.helix-brand-logo{width:36px;height:36px;border-radius:12px;overflow:hidden;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,0.12);box-shadow:inset 0 0 0 1px rgba(255,255,255,0.12);flex-shrink:0}',
+    '.helix-brand-logo img{width:100%;height:100%;object-fit:cover;display:block}',
+    '.helix-brand-fallback{font-size:14px;font-weight:800;letter-spacing:.04em;text-transform:uppercase}',
+    '.helix-brand-copy{min-width:0;padding-top:0;display:flex;flex-direction:column;justify-content:center}',
+    '.helix-brand-label{font-size:9px;letter-spacing:.09em;text-transform:uppercase;opacity:.72;margin-bottom:1px;line-height:1.1}',
+    '.helix-brand-name{font-size:16px;font-weight:700;line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px}',
+    '.helix-close{width:30px;height:30px;display:inline-flex;align-items:center;justify-content:center;background:rgba(255,255,255,0.12);border:none;color:#fff;cursor:pointer;font-size:22px;font-weight:400;line-height:1;padding:0 0 2px 0;border-radius:999px;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.14);backdrop-filter:blur(6px);flex-shrink:0;transition:background .18s ease,transform .18s ease}',
+    '.helix-close:hover{background:rgba(255,255,255,0.18);transform:translateY(-1px)}',
+    '.helix-header-copy{display:flex;flex-direction:column;gap:6px;max-height:220px;opacity:1;transform:translateY(0);transform-origin:top left;transition:opacity .24s ease,transform .24s ease,max-height .28s ease}',
+    '.helix-eyebrow{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;opacity:.78}',
+    '.helix-headline{font-size:24px;line-height:1.02;font-weight:800;letter-spacing:-0.03em;max-width:240px}',
+    '.helix-subcopy{font-size:13px;line-height:1.55;max-width:250px;color:rgba(255,255,255,0.86)}',
+    '.helix-page-status{display:inline-flex;align-items:center;gap:8px;align-self:flex-start;max-width:100%;padding:10px 14px;border-radius:16px;background:rgba(255,255,255,0.92);color:#334155;font-size:12px;font-weight:600;box-shadow:0 12px 24px rgba(15,23,42,0.12);max-height:56px;opacity:1;transform:translateY(0);transition:opacity .24s ease,transform .24s ease,max-height .28s ease,padding .24s ease,margin .24s ease}',
+    '.helix-page-status::before{content:"";width:8px;height:8px;border-radius:999px;background:currentColor;opacity:.65;flex-shrink:0}',
+    '.helix-shell{flex:1;display:flex;flex-direction:column;min-height:0;background:linear-gradient(180deg,rgba(248,250,252,0.92) 0%,#ffffff 22%,#ffffff 100%)}',
+    '.helix-body{flex:1;overflow-y:auto;padding:16px 16px 12px;background:transparent;display:flex;flex-direction:column;gap:10px}',
+    '.helix-msg{max-width:86%;padding:13px 16px;border-radius:18px;line-height:1.6;word-wrap:break-word;text-align:left;font-size:13.5px}',
+    '.helix-msg.bot{background:rgba(255,255,255,0.98);border:1px solid rgba(226,232,240,0.95);align-self:flex-start;border-top-left-radius:8px;box-shadow:0 12px 30px rgba(15,23,42,0.06)}',
+    '.helix-msg.user{color:#fff;align-self:flex-end;border-top-right-radius:8px;box-shadow:0 12px 30px rgba(15,23,42,0.14)}',
     '.helix-msg p{margin:0 0 0.6em;line-height:1.65}',
     '.helix-msg p:last-child{margin-bottom:0}',
     '.helix-msg ul{margin:0.4em 0 0.75em 1.1em;padding:0;list-style:disc}',
@@ -668,16 +693,22 @@ class PublicChatController extends Controller
     '.helix-typing span{width:6px;height:6px;border-radius:50%;background:#94a3b8;animation:helixBounce 1.2s infinite}',
     '.helix-typing span:nth-child(2){animation-delay:.15s}.helix-typing span:nth-child(3){animation-delay:.3s}',
     '@keyframes helixBounce{0%,80%,100%{opacity:.3;transform:translateY(0)}40%{opacity:1;transform:translateY(-4px)}}',
-    '.helix-form{display:flex;gap:8px;padding:12px;border-top:1px solid #e2e8f0;background:#fff}',
-    '.helix-input{flex:1;border:1px solid #e2e8f0;border-radius:10px;padding:10px 12px;font-size:14px;outline:none;color:#0f172a}',
-    '.helix-input:focus{border-color:#94a3b8}',
-    '.helix-send{border:none;color:#fff;border-radius:10px;padding:0 14px;cursor:pointer;font-weight:600}',
+    '@keyframes helixPanelIn{0%{opacity:0;transform:translateY(24px) scale(.94)}100%{opacity:1;transform:translateY(0) scale(1)}}',
+    '@keyframes helixPanelOut{0%{opacity:1;transform:translateY(0) scale(1)}100%{opacity:0;transform:translateY(18px) scale(.96)}}',
+    '.helix-composer{padding:0 14px 14px;background:transparent}',
+    '.helix-composer-card{border-radius:22px;background:rgba(255,255,255,0.96);border:1px solid rgba(226,232,240,0.95);box-shadow:0 18px 36px rgba(15,23,42,0.10);overflow:hidden}',
+    '.helix-email{padding:12px 12px 0;background:transparent;border-top:none}',
+    '.helix-email input{width:100%;border:1px solid #e2e8f0;border-radius:14px;padding:11px 13px;font-size:13px;outline:none;background:#fff;color:#0f172a;transition:border-color .2s ease,box-shadow .2s ease}',
+    '.helix-email input:focus{border-color:#94a3b8;box-shadow:0 0 0 4px rgba(148,163,184,0.12)}',
+    '.helix-form{display:flex;gap:10px;padding:12px;background:transparent}',
+    '.helix-input{flex:1;border:1px solid #e2e8f0;border-radius:16px;padding:12px 14px;font-size:14px;outline:none;color:#0f172a;background:#fff;transition:border-color .2s ease,box-shadow .2s ease}',
+    '.helix-input:focus{border-color:#94a3b8;box-shadow:0 0 0 4px rgba(148,163,184,0.12)}',
+    '.helix-send{border:none;color:#fff;border-radius:16px;padding:0 18px;cursor:pointer;font-weight:700;min-width:88px;box-shadow:0 14px 24px rgba(15,23,42,0.16);transition:transform .2s ease,box-shadow .2s ease}',
+    '.helix-send:hover{transform:translateY(-1px);box-shadow:0 18px 28px rgba(15,23,42,0.18)}',
     '.helix-send:disabled{opacity:.5;cursor:not-allowed}',
-    '.helix-foot{text-align:center;padding:6px;font-size:11px;color:#94a3b8;background:#fff;border-top:1px solid #f1f5f9}',
+    '.helix-foot{text-align:center;padding:0 0 14px;font-size:11px;color:#94a3b8;background:transparent;border-top:none}',
     '.helix-foot a{color:#64748b;text-decoration:none}',
-    '.helix-email{padding:12px;background:#fff;border-top:1px solid #e2e8f0}',
-    '.helix-email input{width:100%;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;font-size:13px;outline:none}',
-    '@media (max-width:640px){.helix-panel{bottom:88px;width:min(380px,calc(100vw - 20px));max-width:calc(100vw - 20px);height:min(560px,calc(100vh - 108px))}}',
+    ' (max-width:640px){.helix-panel{bottom:86px;width:min(390px,calc(100vw - 16px));max-width:calc(100vw - 16px);height:min(620px,calc(100vh - 100px));border-radius:24px}.helix-header{padding:9px 11px 11px}.helix-headline{font-size:22px;max-width:100%}.helix-brand-name{max-width:170px}.helix-composer{padding:0 10px 10px}.helix-body{padding:14px 12px 10px}.helix-page-status{max-width:100%}.helix-panel.is-compact .helix-header{padding:8px 10px 9px}}',
   ].join('');
   root.appendChild(style);
 
@@ -688,8 +719,11 @@ class PublicChatController extends Controller
     }
     if (state.open && !state.closing) return;
     state.closing = false;
+    state.headerCompact = false;
+    state.panelAnimatedIn = false;
     state.open = true;
     if (state.messages.length === 0) state.messages.push({ role: 'assistant', content: state.bot.welcome_message });
+    persistSession();
     render();
   }
 
@@ -701,8 +735,9 @@ class PublicChatController extends Controller
       state.open = false;
       state.closing = false;
       closeTimer = null;
+      persistSession();
       render();
-    }, 200);
+    }, 240);
   }
 
   function normalizeText(value, maxLen){
@@ -773,6 +808,28 @@ class PublicChatController extends Controller
     return sections.slice(0, 12);
   }
 
+  function collectPageLinks(){
+    try{
+      var seen = {};
+      var links = [];
+      var nodes = document.querySelectorAll ? document.querySelectorAll('a[href]') : [];
+      for (var i = 0; i < nodes.length; i++) {
+        var el = nodes[i];
+        if (!el || !el.href || (el.closest && el.closest('#helix-widget-root'))) continue;
+        var href = String(el.getAttribute('href') || '').trim();
+        if (!href || href.indexOf('#') === 0 || href.indexOf('javascript:') === 0 || href.indexOf('mailto:') === 0 || href.indexOf('tel:') === 0) continue;
+        var label = normalizeText(el.innerText || el.textContent || '', 80);
+        if (!label || label.length < 2) continue;
+        var key = label.toLowerCase();
+        if (seen[key]) continue;
+        seen[key] = true;
+        links.push({ label: label, url: el.href });
+        if (links.length >= 40) break;
+      }
+      return links;
+    }catch(e){ return []; }
+  }
+
   function getPageContext(){
     try{
       var pageName = normalizeText((document.querySelector('h1') || {}).innerText || document.title || '', 180);
@@ -782,11 +839,12 @@ class PublicChatController extends Controller
         pageTitle: normalizeText(document.title || '', 300),
         pageName: pageName,
         pageUrl: window.location.href,
+        pageLinks: collectPageLinks(),
         pageSections: pageSections,
         pageContent: bodyText,
         scrapedAt: new Date().toISOString()
       };
-    }catch(e){ return { pageTitle:'', pageName:'', pageUrl:window.location.href, pageContent:'', pageSections:[], scrapedAt:new Date().toISOString() }; }
+    }catch(e){ return { pageTitle:'', pageName:'', pageUrl:window.location.href, pageLinks:[], pageContent:'', pageSections:[], scrapedAt:new Date().toISOString() }; }
   }
 
   function buildPageSignature(ctx){
@@ -794,6 +852,7 @@ class PublicChatController extends Controller
       ctx.pageUrl || '',
       ctx.pageTitle || '',
       ctx.pageName || '',
+      ((ctx.pageLinks || []).map(function(link){ return [link.label || '', link.url || ''].join('='); }).join('|')).substring(0, 600),
       (ctx.pageContent || '').substring(0, 1600)
     ]);
   }
@@ -888,6 +947,7 @@ class PublicChatController extends Controller
       messages: state.messages,
       draftMessage: state.draftMessage,
       draftEmail: state.draftEmail,
+      open: !!(state.open || state.closing),
       expiresAt: expiresAt
     }));
   }
@@ -905,6 +965,8 @@ class PublicChatController extends Controller
       state.messages = Array.isArray(saved.messages) ? saved.messages : [];
       state.draftMessage = typeof saved.draftMessage === 'string' ? saved.draftMessage : '';
       state.draftEmail = typeof saved.draftEmail === 'string' ? saved.draftEmail : '';
+      state.open = !!saved.open;
+      state.closing = false;
     } catch (e) {
       localStorage.removeItem(SESSION_STORE_KEY);
     }
@@ -922,15 +984,105 @@ class PublicChatController extends Controller
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || '').trim());
   }
 
+  function requiresVisitorEmail(){
+    return !!(state.bot && state.bot.collect_email);
+  }
+
+  function shouldHideEmailField(){
+    var email = getDraftOrStoredEmail();
+    return requiresVisitorEmail()
+      && isValidEmail(email)
+      && (!!String(state.draftMessage || '').trim() || state.messages.length > 0);
+  }
+
   function canSendMessage(message, email){
-    return !state.sending && !!String(message || '').trim() && isValidEmail(email);
+    return !state.sending
+      && !!String(message || '').trim()
+      && (!requiresVisitorEmail() || isValidEmail(email));
   }
 
   function persistVisitorEmail(email){
     var normalizedEmail = String(email || '').trim();
+    if (!requiresVisitorEmail()) {
+      state.draftEmail = normalizedEmail;
+      persistSession();
+      return;
+    }
     localStorage.setItem(STORE_KEY + '_email', normalizedEmail);
     state.draftEmail = normalizedEmail;
     persistSession();
+  }
+
+  function clamp(value, min, max){
+    return Math.max(min, Math.min(max, value));
+  }
+
+  function hexToRgb(hex){
+    var value = String(hex || '').replace('#', '');
+    if (!/^[0-9a-fA-F]{6}$/.test(value)) return { r: 124, g: 92, b: 255 };
+    return {
+      r: parseInt(value.substring(0, 2), 16),
+      g: parseInt(value.substring(2, 4), 16),
+      b: parseInt(value.substring(4, 6), 16)
+    };
+  }
+
+  function rgbToHex(rgb){
+    function part(value){
+      var out = clamp(Math.round(value), 0, 255).toString(16);
+      return out.length === 1 ? '0' + out : out;
+    }
+    return '#' + part(rgb.r) + part(rgb.g) + part(rgb.b);
+  }
+
+  function mixHex(hex, target, weight){
+    var a = hexToRgb(hex);
+    var b = hexToRgb(target);
+    var w = clamp(weight, 0, 1);
+    return rgbToHex({
+      r: a.r + (b.r - a.r) * w,
+      g: a.g + (b.g - a.g) * w,
+      b: a.b + (b.b - a.b) * w
+    });
+  }
+
+  function rgba(hex, alpha){
+    var rgb = hexToRgb(hex);
+    return 'rgba(' + rgb.r + ',' + rgb.g + ',' + rgb.b + ',' + clamp(alpha, 0, 1) + ')';
+  }
+
+  function luminance(hex){
+    var rgb = hexToRgb(hex);
+    return (0.299 * rgb.r + 0.587 * rgb.g + 0.114 * rgb.b) / 255;
+  }
+
+  function contrastText(hex){
+    return luminance(hex) > 0.64 ? '#0f172a' : '#ffffff';
+  }
+
+  function deriveTheme(color){
+    var primary = /^#[0-9a-fA-F]{6}$/.test(String(color || '')) ? color : '#7c5cff';
+    var deep = mixHex(primary, '#0f172a', 0.34);
+    var soft = mixHex(primary, '#ffffff', 0.68);
+    var mist = mixHex(primary, '#ffffff', 0.86);
+    return {
+      primary: primary,
+      primaryDeep: deep,
+      primarySoft: soft,
+      primaryMist: mist,
+      primaryText: contrastText(primary),
+      bubbleGradient: 'linear-gradient(145deg,' + mixHex(primary, '#ffffff', 0.18) + ' 0%,' + deep + ' 100%)',
+      headerGradient: 'linear-gradient(160deg,' + mixHex(primary, '#ffffff', 0.28) + ' 0%,' + primary + ' 46%,' + deep + ' 100%)',
+      userGradient: 'linear-gradient(135deg,' + primary + ' 0%,' + deep + ' 100%)',
+      bodyGlow: 'radial-gradient(circle at top left,' + rgba(soft, 0.52) + ' 0%,rgba(255,255,255,0) 48%),linear-gradient(180deg,' + mist + ' 0%,#ffffff 24%,#ffffff 100%)'
+    };
+  }
+
+  function updateCompactHeader(panel, scrolled){
+    if (!panel) return;
+    state.headerCompact = !!scrolled;
+    if (state.headerCompact) panel.classList.add('is-compact');
+    else panel.classList.remove('is-compact');
   }
 
   function syncComposerState(panel){
@@ -979,13 +1131,22 @@ class PublicChatController extends Controller
   function render(){
     if (!state.bot) return;
     var color = state.bot.primary_color || '#7c5cff';
+    var theme = deriveTheme(color);
     var pos = state.bot.bubble_position === 'left' ? 'left:20px' : 'right:20px';
+    var logoMarkup = state.bot.logo_url
+      ? '<div class="helix-brand-logo"><img src="' + escapeHtml(state.bot.logo_url) + '" alt="' + escapeHtml((state.bot.name || 'Bot') + ' logo') + '"/></div>'
+      : '<div class="helix-brand-logo"><span class="helix-brand-fallback">' + escapeHtml((state.bot.name || 'B').charAt(0)) + '</span></div>';
+    var collectEmail = requiresVisitorEmail();
+    var hideEmailField = shouldHideEmailField();
+    var emailSection = collectEmail && !hideEmailField
+      ? '<div class="helix-email"><input id="helix-email" type="email" placeholder="Your email" autocomplete="email" inputmode="email" required/></div>'
+      : '';
     root.innerHTML = '';
     root.appendChild(style);
 
     var bubble = document.createElement('button');
     bubble.className = 'helix-bubble' + ((state.open || state.closing) ? ' is-active' : '');
-    bubble.setAttribute('style', pos + ';background:' + (state.bot.logo_url ? 'transparent' : color));
+    bubble.setAttribute('style', pos + ';background:' + (state.bot.logo_url ? 'transparent' : theme.bubbleGradient) + ';color:' + theme.primaryText);
     bubble.setAttribute('aria-label', 'Open chat');
     bubble.innerHTML = (state.open || state.closing)
       ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 6L18 18M6 18L18 6"/></svg>'
@@ -998,23 +1159,43 @@ class PublicChatController extends Controller
     if (!state.open && !state.closing) return;
 
     var panel = document.createElement('div');
-    panel.className = 'helix-panel' + (state.closing ? ' is-closing' : '');
+    panel.className = 'helix-panel' + (state.closing ? ' is-closing' : '') + (!state.closing && !state.panelAnimatedIn ? ' is-opening' : '') + (state.headerCompact ? ' is-compact' : '');
     panel.setAttribute('style', pos);
     panel.setAttribute('data-side', state.bot.bubble_position === 'left' ? 'left' : 'right');
     panel.innerHTML =
-      '<div class="helix-header" style="background:' + color + '"><span>' + escapeHtml(state.bot.name) + '</span><button class="helix-close" aria-label="Close">x</button></div>' +
-      '<div class="helix-page-status">' + escapeHtml(state.pageReadLabel || 'Reading current page') + '</div>' +
-      '<div class="helix-body" id="helix-body"></div>' +
-      '<div class="helix-email"><input id="helix-email" type="email" placeholder="Your email" autocomplete="email" inputmode="email" required/></div>' +
-      '<form class="helix-form" id="helix-form"><input class="helix-input" id="helix-input" placeholder="Ask anything..." autocomplete="off"/><button class="helix-send" id="helix-send" type="submit" style="background:' + color + '">Send</button></form>' +
-      '<div class="helix-foot">Powered by <a href="' + ORIGIN + '" target="_blank" rel="noopener">Helix</a></div>';
+      '<div class="helix-header" style="background:' + theme.headerGradient + '">' +
+        '<div class="helix-header-top">' +
+          '<div class="helix-brand">' +
+            logoMarkup +
+            '<div class="helix-brand-copy"><div class="helix-brand-label">AI assistant</div><div class="helix-brand-name">' + escapeHtml(state.bot.name) + '</div></div>' +
+          '</div>' +
+          '<button class="helix-close" aria-label="Close">&times;</button>' +
+        '</div>' +
+        '<div class="helix-header-copy">' +
+          '<div class="helix-eyebrow">Ask anything</div>' +
+          '<div class="helix-headline">' + escapeHtml(state.bot.welcome_message || 'Hi! How can I help you today?') + '</div>' +
+        '</div>' +
+        '<div class="helix-page-status">' + escapeHtml(state.pageReadLabel || 'Reading current page') + '</div>' +
+      '</div>' +
+      '<div class="helix-shell" style="background:' + theme.bodyGlow + '">' +
+        '<div class="helix-body" id="helix-body"></div>' +
+        '<div class="helix-composer"><div class="helix-composer-card">' +
+          emailSection +
+          '<form class="helix-form" id="helix-form"><input class="helix-input" id="helix-input" placeholder="Ask anything..." autocomplete="off"/><button class="helix-send" id="helix-send" type="submit" style="background:' + theme.userGradient + ';color:' + theme.primaryText + '">Send</button></form>' +
+        '</div></div>' +
+        '<div class="helix-foot">Powered by <a href="' + ORIGIN + '">Helix</a></div>' +
+      '</div>';
     root.appendChild(panel);
+    if (!state.closing && !state.panelAnimatedIn) {
+      state.panelAnimatedIn = true;
+    }
 
     var body = panel.querySelector('#helix-body');
     state.messages.forEach(function(m){
       var div = document.createElement('div');
       div.className = 'helix-msg ' + (m.role === 'user' ? 'user' : 'bot');
-      if (m.role === 'user') div.style.background = color;
+      if (m.role === 'user') div.style.background = theme.userGradient;
+      if (m.role === 'user') div.style.color = theme.primaryText;
       if (m.role === 'user') div.textContent = m.content;
       else div.innerHTML = renderMessageHtml(m.content);
       body.appendChild(div);
@@ -1027,6 +1208,9 @@ class PublicChatController extends Controller
       body.appendChild(t);
     }
     body.scrollTop = body.scrollHeight;
+    body.onscroll = function(){
+      updateCompactHeader(panel, body.scrollTop > 24);
+    };
 
     panel.querySelector('.helix-close').onclick = function(){ closeWidget(); };
     var emailInput = panel.querySelector('#helix-email');
@@ -1046,12 +1230,12 @@ class PublicChatController extends Controller
       e.preventDefault();
       var v = messageInput.value;
       var email = emailInput ? emailInput.value.trim() : getDraftOrStoredEmail();
-      if (!isValidEmail(email)) {
+      if (collectEmail && !isValidEmail(email)) {
         if (emailInput) emailInput.focus();
         syncComposerState(panel);
         return false;
       }
-      persistVisitorEmail(email);
+      if (collectEmail) persistVisitorEmail(email);
       messageInput.value = '';
       syncComposerState(panel);
       send(v);
@@ -1081,8 +1265,58 @@ class PublicChatController extends Controller
       .replace(/\s+-\s+(?=[A-Z*])/g, '\n- ')
       .replace(/\n{3,}/g, '\n\n');
   }
+  function escapeRegExp(s){ return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+  function createAnchorHtml(url, label){
+    return '<a href="' + escapeHtml(url) + '">' + label + '</a>';
+  }
+  function applyAutoLinkPlaceholders(text, placeholders){
+    var links = (state.pageContext && state.pageContext.pageLinks) || [];
+    if (!links.length || !text) return text;
+
+    var candidates = [];
+    var seen = {};
+    for (var i = 0; i < links.length; i++) {
+      var link = links[i] || {};
+      var label = String(link.label || '').trim();
+      var url = String(link.url || '').trim();
+      if (!label || !url || label.length < 2) continue;
+      var key = label.toLowerCase();
+      if (seen[key]) continue;
+      seen[key] = true;
+      candidates.push({ label: label, url: url });
+    }
+
+    candidates.sort(function(a, b){ return b.label.length - a.label.length; });
+
+    for (var j = 0; j < candidates.length; j++) {
+      var item = candidates[j];
+      var pattern = new RegExp('(^|[^A-Za-z0-9])(' + escapeRegExp(item.label) + ')(?=[^A-Za-z0-9]|$)', 'gi');
+      text = text.replace(pattern, function(match, prefix, labelText){
+        var placeholder = '\x00HTML' + placeholders.length + '\x00';
+        placeholders.push(createAnchorHtml(item.url, labelText));
+        return prefix + placeholder;
+      });
+    }
+
+    return text;
+  }
   function formatInlineMarkdown(s){
     var text = String(s || '');
+    var htmlPlaceholders = [];
+
+    text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, function(_, label, url){
+      var placeholder = '\x00HTML' + htmlPlaceholders.length + '\x00';
+      htmlPlaceholders.push(createAnchorHtml(url, label));
+      return placeholder;
+    });
+    text = text.replace(/https?:\/\/[^\s<>"')\]]+/g, function(url){
+      var clean = url.replace(/[.,;:!?)\]]+$/, '');
+      var placeholder = '\x00HTML' + htmlPlaceholders.length + '\x00';
+      htmlPlaceholders.push(createAnchorHtml(clean, clean));
+      return placeholder + url.slice(clean.length);
+    });
+    text = applyAutoLinkPlaceholders(text, htmlPlaceholders);
+
     var out = '';
     var index = 0;
 
@@ -1107,10 +1341,11 @@ class PublicChatController extends Controller
     }
 
     out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
-    out = out.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    out = out.replace(/\x00HTML(\d+)\x00/g, function(_, idx){ return htmlPlaceholders[parseInt(idx, 10)] || ''; });
 
     return out;
   }
+
   function renderMessageHtml(content){
     var lines = normalizeMessageText(content).split('\n');
     var parts = [];
@@ -1185,6 +1420,16 @@ JS;
                 $content = $section['content'] ?? '';
                 if ($content !== '') {
                     $lines[] = '- ' . $name . ': ' . $content;
+                }
+            }
+        }
+        if (! empty($pageContext['pageLinks']) && is_array($pageContext['pageLinks'])) {
+            $lines[] = 'Visible Page Links:';
+            foreach (array_slice($pageContext['pageLinks'], 0, 25) as $link) {
+                $label = trim((string) ($link['label'] ?? ''));
+                $url = trim((string) ($link['url'] ?? ''));
+                if ($label !== '' && $url !== '') {
+                    $lines[] = '- ' . $label . ': ' . $url;
                 }
             }
         }

@@ -56,9 +56,9 @@ function buildWidget(origin: string): string {
     '.helix-panel.is-closing{animation:helixPanelOut .24s cubic-bezier(.4,0,1,1) forwards;pointer-events:none}',
     '@keyframes helixPanelIn{0%{opacity:0;transform:translateY(20px) scale(.92)}100%{opacity:1;transform:translateY(0) scale(1)}}',
     '@keyframes helixPanelOut{0%{opacity:1;transform:translateY(0) scale(1)}100%{opacity:0;transform:translateY(16px) scale(.94)}}',
-    '.helix-header{padding:14px 16px;color:#fff;display:flex;align-items:center;justify-content:space-between;font-weight:600}',
-    '.helix-close{background:transparent;border:none;color:#fff;cursor:pointer;font-size:20px;line-height:1;padding:4px 8px;border-radius:6px}',
-    '.helix-close:hover{background:rgba(255,255,255,.15)}',
+    '.helix-header{padding:9px 11px;color:#fff;display:flex;align-items:center;justify-content:space-between;font-weight:600;gap:8px}',
+    '.helix-close{width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;background:rgba(255,255,255,0.12);border:none;color:#fff;cursor:pointer;font-size:20px;line-height:1;padding:0 0 2px 0;border-radius:999px;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.14);transition:background .18s ease}',
+    '.helix-close:hover{background:rgba(255,255,255,0.18)}',
     '.helix-page-status{padding:8px 16px;border-bottom:1px solid #e2e8f0;background:#f8fafc;font-size:12px;color:#475569}',
     '.helix-body{flex:1;overflow-y:auto;padding:16px;background:#f8fafc;display:flex;flex-direction:column;gap:8px}',
     '.helix-msg{max-width:85%;padding:10px 14px;border-radius:14px;line-height:1.6;word-wrap:break-word;font-size:14px}',
@@ -109,6 +109,7 @@ function buildWidget(origin: string): string {
     state.closing = false;
     state.open = true;
     if (state.messages.length === 0) state.messages.push({ role: 'assistant', content: state.bot.welcome_message });
+    persistSession();
     render();
   }
 
@@ -126,6 +127,7 @@ function buildWidget(origin: string): string {
       state.open = false;
       state.closing = false;
       closeTimer = null;
+      persistSession();
       // Remove panel from DOM after animation completes
       var p = root.querySelector('.helix-panel');
       if (p) root.removeChild(p);
@@ -201,6 +203,28 @@ function buildWidget(origin: string): string {
     return sections.slice(0, 12);
   }
 
+  function collectPageLinks(){
+    try{
+      var seen = {};
+      var links = [];
+      var nodes = document.querySelectorAll ? document.querySelectorAll('a[href]') : [];
+      for (var i = 0; i < nodes.length; i++) {
+        var el = nodes[i];
+        if (!el || !el.href || (el.closest && el.closest('#helix-widget-root'))) continue;
+        var href = String(el.getAttribute('href') || '').trim();
+        if (!href || href.indexOf('#') === 0 || href.indexOf('javascript:') === 0 || href.indexOf('mailto:') === 0 || href.indexOf('tel:') === 0) continue;
+        var label = normalizeText(el.innerText || el.textContent || '', 80);
+        if (!label || label.length < 2) continue;
+        var key = label.toLowerCase();
+        if (seen[key]) continue;
+        seen[key] = true;
+        links.push({ label: label, url: el.href });
+        if (links.length >= 40) break;
+      }
+      return links;
+    }catch(e){ return []; }
+  }
+
   function getPageContext(){
     try{
       var pageName = normalizeText((document.querySelector('h1') || {}).innerText || document.title || '', 180);
@@ -210,11 +234,12 @@ function buildWidget(origin: string): string {
         pageTitle: normalizeText(document.title || '', 300),
         pageName: pageName,
         pageUrl: window.location.href,
+        pageLinks: collectPageLinks(),
         pageSections: pageSections,
         pageContent: bodyText,
         scrapedAt: new Date().toISOString()
       };
-    }catch(e){ return { pageTitle:'', pageName:'', pageUrl:window.location.href, pageContent:'', pageSections:[], scrapedAt:new Date().toISOString() }; }
+    }catch(e){ return { pageTitle:'', pageName:'', pageUrl:window.location.href, pageLinks:[], pageContent:'', pageSections:[], scrapedAt:new Date().toISOString() }; }
   }
 
   function buildPageSignature(ctx){
@@ -222,6 +247,7 @@ function buildWidget(origin: string): string {
       ctx.pageUrl || '',
       ctx.pageTitle || '',
       ctx.pageName || '',
+      ((ctx.pageLinks || []).map(function(link){ return [link.label || '', link.url || ''].join('='); }).join('|')).substring(0, 600),
       (ctx.pageContent || '').substring(0, 1600)
     ]);
   }
@@ -316,6 +342,7 @@ function buildWidget(origin: string): string {
       messages: state.messages,
       draftMessage: state.draftMessage,
       draftEmail: state.draftEmail,
+      open: !!(state.open || state.closing),
       expiresAt: expiresAt
     }));
   }
@@ -333,6 +360,8 @@ function buildWidget(origin: string): string {
       state.messages = Array.isArray(saved.messages) ? saved.messages : [];
       state.draftMessage = typeof saved.draftMessage === 'string' ? saved.draftMessage : '';
       state.draftEmail = typeof saved.draftEmail === 'string' ? saved.draftEmail : '';
+      state.open = !!saved.open;
+      state.closing = false;
     } catch (e) {
       localStorage.removeItem(SESSION_STORE_KEY);
     }
@@ -449,7 +478,7 @@ function buildWidget(origin: string): string {
         '<div class="helix-body" id="helix-body"></div>' +
         '<div class="helix-email"><input id="helix-email" type="email" placeholder="Your email" autocomplete="email" inputmode="email" required/></div>' +
         '<form class="helix-form" id="helix-form"><input class="helix-input" id="helix-input" placeholder="Ask anything…" autocomplete="off"/><button class="helix-send" id="helix-send" type="button" style="background:' + color + '">Send</button></form>' +
-        '<div class="helix-foot">Powered by <a href="' + ORIGIN + '" target="_blank" rel="noopener">Helix</a></div>';
+        '<div class="helix-foot">Powered by <a href="' + ORIGIN + '">Helix</a></div>';
       
       // Setup event handlers only on initial creation
       var closeBtn = panel.querySelector('.helix-close');
@@ -612,14 +641,58 @@ function buildWidget(origin: string): string {
       .replace(/\n{3,}/g, '\n\n')
       .trim();
   }
+  function escapeRegExp(s){ return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+  function createAnchorHtml(url, label){
+    return '<a href="' + escapeHtml(url) + '">' + label + '</a>';
+  }
+  function applyAutoLinkPlaceholders(text, placeholders){
+    var links = (state.pageContext && state.pageContext.pageLinks) || [];
+    if (!links.length || !text) return text;
+
+    var candidates = [];
+    var seen = {};
+    for (var i = 0; i < links.length; i++) {
+      var link = links[i] || {};
+      var label = String(link.label || '').trim();
+      var url = String(link.url || '').trim();
+      if (!label || !url || label.length < 2) continue;
+      var key = label.toLowerCase();
+      if (seen[key]) continue;
+      seen[key] = true;
+      candidates.push({ label: label, url: url });
+    }
+
+    candidates.sort(function(a, b){ return b.label.length - a.label.length; });
+
+    for (var j = 0; j < candidates.length; j++) {
+      var item = candidates[j];
+      var pattern = new RegExp('(^|[^A-Za-z0-9])(' + escapeRegExp(item.label) + ')(?=[^A-Za-z0-9]|$)', 'gi');
+      text = text.replace(pattern, function(match, prefix, labelText){
+        var placeholder = '\x00HTML' + placeholders.length + '\x00';
+        placeholders.push(createAnchorHtml(item.url, labelText));
+        return prefix + placeholder;
+      });
+    }
+
+    return text;
+  }
   function formatInline(text){
-    var urlPlaceholders = [];
-    var urlIdx = 0;
-    text = text.replace(/https?:\/\/[^\s<>"')\"]]+/g, function(url){
-      var clean = url.replace(/[.,;:!?)\"]]+$/, '');
-      urlPlaceholders.push(clean);
-      return '\x00URL' + (urlIdx++) + '\x00';
+    var htmlPlaceholders = [];
+    text = String(text || '');
+
+    text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, function(_, label, url){
+      var placeholder = '\x00HTML' + htmlPlaceholders.length + '\x00';
+      htmlPlaceholders.push(createAnchorHtml(url, escapeHtml(label)));
+      return placeholder;
     });
+    text = text.replace(/https?:\/\/[^\s<>"')\]]+/g, function(url){
+      var clean = url.replace(/[.,;:!?)\]]+$/, '');
+      var placeholder = '\x00HTML' + htmlPlaceholders.length + '\x00';
+      htmlPlaceholders.push(createAnchorHtml(clean, escapeHtml(clean)));
+      return placeholder + url.slice(clean.length);
+    });
+    text = applyAutoLinkPlaceholders(text, htmlPlaceholders);
+
     text = escapeHtml(text);
     var result = '';
     var i = 0;
@@ -651,12 +724,12 @@ function buildWidget(origin: string): string {
       result += text[i];
       i++;
     }
-    result = result.replace(/\x00URL(\d+)\x00/g, function(_, idx){
-      var url = urlPlaceholders[parseInt(idx, 10)];
-      return '<a href="' + url + '" target="_blank" rel="noopener">' + url + '</a>';
+    result = result.replace(/\x00HTML(\d+)\x00/g, function(_, idx){
+      return htmlPlaceholders[parseInt(idx, 10)] || '';
     });
     return result;
   }
+
   function renderMessageHtml(content){
     var lines = normalizeMessageText(content).split('\n');
     var out = '';
