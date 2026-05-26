@@ -19,6 +19,9 @@ use Illuminate\Support\Str;
 
 class PublicChatController extends Controller
 {
+    /**
+     * Serve the embeddable widget bundle consumed by third-party sites.
+     */
     public function widget(Request $request): \Symfony\Component\HttpFoundation\Response
     {
         return response($this->buildWidget(), 200, [
@@ -29,6 +32,9 @@ class PublicChatController extends Controller
         ] + $this->corsHeaders($request));
     }
 
+    /**
+     * Handle a public chat turn coming from the widget embed.
+     */
     public function chat(Request $request): JsonResponse
     {
         if (! Chatbot::supportsPublicKey()) {
@@ -39,18 +45,7 @@ class PublicChatController extends Controller
 
         $data = $this->validateChatPayload($request);
 
-        $bot = Chatbot::query()
-            ->where(function ($query) use ($data) {
-                if (! empty($data['publicKey'])) {
-                    $query->orWhere('public_key', $data['publicKey']);
-                }
-
-                if (! empty($data['apiKey'])) {
-                    $query->orWhere('api_key', $data['apiKey']);
-                }
-            })
-            ->where('is_active', true)
-            ->first();
+        $bot = $this->findActiveBotByKeys($data['publicKey'] ?? null, $data['apiKey'] ?? null);
 
         if (! $bot) {
             return $this->json($request, ['error' => 'Invalid or inactive public key'], 404);
@@ -67,6 +62,9 @@ class PublicChatController extends Controller
         return $this->handleChat($request, $bot, $data, 'widget');
     }
 
+    /**
+     * Validate and normalize the public chat payload coming from the widget.
+     */
     public function validateChatPayload(Request $request, bool $requirePublicKey = true): array
     {
         $data = validator($this->requestData($request), [
@@ -97,24 +95,12 @@ class PublicChatController extends Controller
         return $data;
     }
 
+    /**
+     * Persist a public conversation turn, enrich it with retrieval context, and ask the model for a reply.
+     */
     public function handleChat(Request $request, Chatbot $bot, array $data, string $source = 'widget'): JsonResponse
     {
-        $conversationSource = trim($source) !== '' ? $source : 'widget';
-
-        $conversation = isset($data['conversationId'])
-            ? Conversation::query()
-                ->where('id', $data['conversationId'])
-                ->where('chatbot_id', $bot->id)
-                ->first()
-            : null;
-
-        $conversation ??= Conversation::create([
-            'chatbot_id' => $bot->id,
-            'user_id' => $bot->user_id,
-            'visitor_id' => $data['visitorId'] ?? 'visitor_' . Str::random(16),
-            'visitor_email' => $data['visitorEmail'] ?? null,
-            'source' => $conversationSource,
-        ]);
+        $conversation = $this->resolveConversation($bot, $data, $source);
 
         Message::create([
             'conversation_id' => $conversation->id,
@@ -123,63 +109,19 @@ class PublicChatController extends Controller
             'content' => $data['message'],
         ]);
 
-        $retrievalQuery = $this->buildRetrievalQuery($data['message'], $data['history'] ?? []);
-        $context = $this->buildKnowledgeContext($bot, $retrievalQuery, $data['message']);
-
         $pageContext = $data['pageContext'] ?? null;
         $pageContextText = $this->buildPageContextText($pageContext);
+        $knowledgeContext = $this->buildKnowledgeContext(
+            $bot,
+            $this->buildRetrievalQuery($data['message'], $data['history'] ?? []),
+            $data['message']
+        );
 
-        $system = trim($bot->system_prompt . "\n\n"
-            . "Use the KNOWLEDGE BASE CONTEXT as the primary source of truth for facts from uploaded files, pasted text, and imported URLs.\n"
-            . "Use the CURRENT PAGE CONTEXT when the user is clearly asking about the page they are viewing, its visible content, or actions they can take on it.\n"
-            . "Do not ignore relevant knowledge base context just because live page context is present.\n"
-            . "The user may refer to the live page indirectly using phrases like 'this page', 'this webpage', 'this screen', 'here', 'the current page', or 'where I am now'.\n"
-            . "When that happens, answer using the CURRENT PAGE CONTEXT first, then supplement with the knowledge base if it helps.\n"
-            . "If CURRENT PAGE CONTEXT is present, never say that you cannot see the page or that you do not know what page the user means.\n"
-            . "If the user asks to explain the current page, describe its purpose, important visible sections, and what the user can do there.\n"
-            . ($pageContextText !== '' ? "\nCURRENT PAGE CONTEXT:\n{$pageContextText}\n" : '')
-            . "\n"
-            . ($context
-                ? "KNOWLEDGE BASE CONTEXT:\n{$context}"
-                : "No knowledge base context matched strongly enough. Answer from the current page context when available, otherwise say when you do not know."));
-
-        $messages = collect($data['history'] ?? [])
-            ->take(-10)
-            ->map(fn ($m) => ['role' => $m['role'], 'content' => $m['content']])
-            ->when($pageContextText !== '', function ($collection) use ($pageContext) {
-                $summary = [];
-
-                if (! empty($pageContext['pageName'])) {
-                    $summary[] = 'Current page: ' . $pageContext['pageName'];
-                } elseif (! empty($pageContext['pageTitle'])) {
-                    $summary[] = 'Current page: ' . $pageContext['pageTitle'];
-                }
-
-                if (! empty($pageContext['pageSections']) && is_array($pageContext['pageSections'])) {
-                    $sections = collect($pageContext['pageSections'])
-                        ->take(6)
-                        ->map(fn ($section) => ($section['name'] ?? 'Section') . ': ' . ($section['content'] ?? ''))
-                        ->implode(' | ');
-
-                    if ($sections !== '') {
-                        $summary[] = 'Visible sections: ' . $sections;
-                    }
-                }
-
-                if (count($summary) > 0) {
-                    $collection->push([
-                        'role' => 'assistant',
-                        'content' => '[Live page context for this turn] ' . implode(' || ', $summary),
-                    ]);
-                }
-
-                return $collection;
-            })
-            ->push(['role' => 'user', 'content' => $data['message']])
-            ->values()
-            ->all();
-
-        $reply = $this->ollama($system, $messages);
+        $reply = $this->generateReply(
+            $this->buildSystemPrompt($bot, $pageContextText, $knowledgeContext),
+            $this->buildChatMessages($data, $pageContext),
+            $bot
+        );
 
         Message::create([
             'conversation_id' => $conversation->id,
@@ -206,6 +148,9 @@ class PublicChatController extends Controller
         ]);
     }
 
+    /**
+     * Return the public widget configuration for a chatbot.
+     */
     public function bot(Request $request, string $apiKey): JsonResponse
     {
         if (! Chatbot::supportsPublicKey()) {
@@ -214,13 +159,7 @@ class PublicChatController extends Controller
             ], 503);
         }
 
-        $bot = Chatbot::query()
-            ->where(function ($query) use ($apiKey) {
-                $query->where('public_key', $apiKey)
-                    ->orWhere('api_key', $apiKey);
-            })
-            ->where('is_active', true)
-            ->first();
+        $bot = $this->findActiveBotByKeys($apiKey, $apiKey);
 
         if (! $bot) {
             return $this->json($request, ['error' => 'Not found'], 404);
@@ -245,19 +184,16 @@ class PublicChatController extends Controller
         ]);
     }
 
+    /**
+     * Stream the public logo asset for a chatbot when the requesting domain is allowed.
+     */
     public function logo(Request $request, string $apiKey): Response
     {
         if (! Chatbot::supportsPublicKey()) {
             return response('Not found', 404);
         }
 
-        $bot = Chatbot::query()
-            ->where(function ($query) use ($apiKey) {
-                $query->where('public_key', $apiKey)
-                    ->orWhere('api_key', $apiKey);
-            })
-            ->where('is_active', true)
-            ->first();
+        $bot = $this->findActiveBotByKeys($apiKey, $apiKey);
 
         if (! $bot || ! $this->isAllowedDomain($request, $bot)) {
             return response('Not found', 404);
@@ -276,6 +212,9 @@ class PublicChatController extends Controller
         ]);
     }
 
+    /**
+     * Rate-limit by both IP and visitor id so embeds cannot be spammed from a single browser or network.
+     */
     private function enforceRateLimit(Request $request, Chatbot $bot, ?string $visitorId = null): ?JsonResponse
     {
         if (! Chatbot::supportsPublicRateLimit()) {
@@ -404,6 +343,137 @@ class PublicChatController extends Controller
         return '/api/public/logo/' . $apiKey;
     }
 
+    /**
+     * Find an active chatbot using either its public embed key or the legacy API key.
+     */
+    private function findActiveBotByKeys(?string $publicKey, ?string $apiKey): ?Chatbot
+    {
+        return Chatbot::query()
+            ->where(function ($query) use ($publicKey, $apiKey) {
+                if (! empty($publicKey)) {
+                    $query->orWhere('public_key', $publicKey);
+                }
+
+                if (! empty($apiKey)) {
+                    $query->orWhere('api_key', $apiKey);
+                }
+            })
+            ->where('is_active', true)
+            ->first();
+    }
+
+    /**
+     * Reuse an existing public conversation when possible so the widget keeps the same thread.
+     */
+    private function resolveConversation(Chatbot $bot, array $data, string $source): Conversation
+    {
+        $conversationSource = trim($source) !== '' ? $source : 'widget';
+
+        $conversation = isset($data['conversationId'])
+            ? Conversation::query()
+                ->where('id', $data['conversationId'])
+                ->where('chatbot_id', $bot->id)
+                ->first()
+            : null;
+
+        return $conversation ?? Conversation::create([
+            'chatbot_id' => $bot->id,
+            'user_id' => $bot->user_id,
+            'visitor_id' => $data['visitorId'] ?? 'visitor_' . Str::random(16),
+            'visitor_email' => $data['visitorEmail'] ?? null,
+            'source' => $conversationSource,
+        ]);
+    }
+
+    /**
+     * Build the system prompt by merging the bot prompt with page-aware and retrieval-aware instructions.
+     */
+    private function buildSystemPrompt(Chatbot $bot, string $pageContextText, string $knowledgeContext): string
+    {
+        $instructions = [
+            $bot->system_prompt,
+            'Use the KNOWLEDGE BASE CONTEXT as the primary source of truth for facts from uploaded files, pasted text, and imported URLs.',
+            'Use the CURRENT PAGE CONTEXT when the user is clearly asking about the page they are viewing, its visible content, or actions they can take on it.',
+            'Do not ignore relevant knowledge base context just because live page context is present.',
+            "The user may refer to the live page indirectly using phrases like 'this page', 'this webpage', 'this screen', 'here', 'the current page', or 'where I am now'.",
+            'When that happens, answer using the CURRENT PAGE CONTEXT first, then supplement with the knowledge base if it helps.',
+            'If CURRENT PAGE CONTEXT is present, never say that you cannot see the page or that you do not know what page the user means.',
+            'If the user asks to explain the current page, describe its purpose, important visible sections, and what the user can do there.',
+        ];
+
+        if ($pageContextText !== '') {
+            $instructions[] = "CURRENT PAGE CONTEXT:
+{$pageContextText}";
+        }
+
+        $instructions[] = $knowledgeContext !== ''
+            ? "KNOWLEDGE BASE CONTEXT:
+{$knowledgeContext}"
+            : 'No knowledge base context matched strongly enough. Answer from the current page context when available, otherwise say when you do not know.';
+
+        return trim(implode("
+
+", $instructions));
+    }
+
+    /**
+     * Keep the model history short, but inject a compact live-page summary when page context exists.
+     */
+    private function buildChatMessages(array $data, ?array $pageContext): array
+    {
+        $messages = collect($data['history'] ?? [])
+            ->take(-10)
+            ->map(fn ($message) => ['role' => $message['role'], 'content' => $message['content']]);
+
+        $pageSummary = $this->buildPageTurnSummary($pageContext);
+        if ($pageSummary !== null) {
+            $messages->push($pageSummary);
+        }
+
+        return $messages
+            ->push(['role' => 'user', 'content' => $data['message']])
+            ->values()
+            ->all();
+    }
+
+    /**
+     * Add a lightweight assistant note so the model sees what page the user is currently on.
+     */
+    private function buildPageTurnSummary(?array $pageContext): ?array
+    {
+        if (! is_array($pageContext)) {
+            return null;
+        }
+
+        $summary = [];
+
+        if (! empty($pageContext['pageName'])) {
+            $summary[] = 'Current page: ' . $pageContext['pageName'];
+        } elseif (! empty($pageContext['pageTitle'])) {
+            $summary[] = 'Current page: ' . $pageContext['pageTitle'];
+        }
+
+        if (! empty($pageContext['pageSections']) && is_array($pageContext['pageSections'])) {
+            $sections = collect($pageContext['pageSections'])
+                ->take(6)
+                ->map(fn ($section) => ($section['name'] ?? 'Section') . ': ' . ($section['content'] ?? ''))
+                ->implode(' | ');
+
+            if ($sections !== '') {
+                $summary[] = 'Visible sections: ' . $sections;
+            }
+        }
+
+        if ($summary === []) {
+            return null;
+        }
+
+        return [
+            'role' => 'assistant',
+            'content' => '[Live page context for this turn] ' . implode(' || ', $summary),
+        ];
+    }
+
     private function buildRetrievalQuery(string $message, array $history = []): string
     {
         $parts = [];
@@ -433,6 +503,9 @@ class PublicChatController extends Controller
         return trim(implode(' ', $parts));
     }
 
+    /**
+     * Format the strongest retrieved knowledge chunks into a compact model-facing context block.
+     */
     private function buildKnowledgeContext(Chatbot $bot, string $retrievalQuery, string $message): string
     {
         $matches = $this->retrieveKnowledgeMatches($bot, $retrievalQuery, $message);
@@ -460,6 +533,9 @@ class PublicChatController extends Controller
             ->implode("\n\n---\n\n");
     }
 
+    /**
+     * Try ranked full-text retrieval first, then fall back to coarse term matching when recall is weak.
+     */
     private function retrieveKnowledgeMatches(Chatbot $bot, string $retrievalQuery, string $message): array
     {
         $termQuery = implode(' ', $this->extractKnowledgeTerms($message));
@@ -579,11 +655,30 @@ class PublicChatController extends Controller
             ->all();
     }
 
-    private function ollama(string $system, array $messages): string
+    /**
+     * Delegate to the appropriate LLM provider (Ollama or OpenRouter) and return the assistant's reply.
+     */
+    private function generateReply(string $system, array $messages, Chatbot $bot): string
     {
-        $response = Http::timeout(120)->post(rtrim(config('services.ollama.url'), '/') . '/api/chat', [
-            'model' => config('services.ollama.model'),
-            'stream' => false,
+        $provider = $bot->llm_provider ?: config('models.llm.default_provider');
+        $model    = $bot->llm_model ?: config("models.llm.{$provider}.model");
+
+        return match ($provider) {
+            'openrouter' => $this->generateOpenRouter($model, $system, $messages),
+            default      => $this->generateOllama($model, $system, $messages),
+        };
+    }
+
+    /**
+     * Call the local Ollama instance.
+     */
+    private function generateOllama(string $model, string $system, array $messages): string
+    {
+        $url = rtrim(config('models.llm.ollama.url'), '/') . '/api/chat';
+
+        $response = Http::timeout(120)->post($url, [
+            'model'    => $model,
+            'stream'   => false,
             'messages' => array_merge(
                 [['role' => 'system', 'content' => $system]],
                 $messages,
@@ -597,6 +692,44 @@ class PublicChatController extends Controller
         return $response->json('message.content') ?: 'Sorry, I had trouble responding.';
     }
 
+    /**
+     * Call OpenRouter's API.
+     */
+    private function generateOpenRouter(string $model, string $system, array $messages): string
+    {
+        $apiKey = config('models.llm.openrouter.api_key') ?: config('services.openrouter.api_key');
+
+        if (! $apiKey) {
+            throw new \RuntimeException('OpenRouter API key is not configured.');
+        }
+
+        $url = rtrim(config('models.llm.openrouter.url'), '/') . '/chat/completions';
+
+        $response = Http::timeout(120)
+            ->withHeaders([
+                'Authorization' => "Bearer {$apiKey}",
+                'Content-Type'  => 'application/json',
+                'HTTP-Referer'  => config('app.url', 'http://localhost'),
+            ])
+            ->post($url, [
+                'model'    => $model,
+                'stream'   => false,
+                'messages' => array_merge(
+                    [['role' => 'system', 'content' => $system]],
+                    $messages,
+                ),
+            ]);
+
+        if (! $response->ok()) {
+            throw new \RuntimeException('OpenRouter failed: ' . $response->body());
+        }
+
+        return $response->json('choices.0.message.content') ?: 'Sorry, I had trouble responding.';
+    }
+
+    /**
+     * Return the self-contained public widget script that is embedded on external websites.
+     */
     private function buildWidget(): string
     {
         $script = <<<'JS'
@@ -1250,20 +1383,8 @@ class PublicChatController extends Controller
   function normalizeMessageText(content){
     return String(content || '')
       .replace(/\r\n?/g, '\n')
-      .replace(/\s+(\d+\.\s+[A-Z])/g, '\n\n$1')
-      .replace(/([.!?]["']?)\s+([A-Z][A-Za-z0-9&/()'\- ]{1,60}:)/g, '$1\n\n$2')
-      .replace(/\s+(In summary:?\s+)/g, '\n\n$1')
-      .replace(/:\s+\*\s+/g, ':\n- ')
-      .replace(/:\s+-\s+/g, ':\n- ')
-      .replace(/\.\s+\*\s+/g, '.\n- ')
-      .replace(/\.\s+-\s+/g, '.\n- ')
-      .replace(/\*\s+\*\*/g, '\n- **')
-      .replace(/\s-\s(?=[A-Z][A-Za-z0-9&/()'"]{1,60}\s-\s[A-Z])/g, '\n- ')
-      .replace(/\s-\s(?=[A-Z][A-Za-z0-9&/()'"]{1,60}:)/g, '\n- ')
-      .replace(/([a-z0-9)])\s+-\s+(?=[A-Z*])/g, '$1\n- ')
-      .replace(/\n\s*\*\s+/g, '\n- ')
-      .replace(/\s+-\s+(?=[A-Z*])/g, '\n- ')
-      .replace(/\n{3,}/g, '\n\n');
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
   }
   function escapeRegExp(s){ return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
   function createAnchorHtml(url, label){
@@ -1346,45 +1467,120 @@ class PublicChatController extends Controller
     return out;
   }
 
+  function renderTableAsBullets(rows){
+    if (rows.length < 2) return '';
+    function splitCells(row){
+      return row.replace(/^\||\|$/g, '').split('|').map(function(c){ return c.trim(); });
+    }
+    var headers = splitCells(rows[0]);
+    var html = '<ul>';
+    for (var r = 2; r < rows.length; r++) {
+      var cells = splitCells(rows[r]);
+      var parts = [];
+      for (var c = 0; c < headers.length; c++) {
+        var label = headers[c] ? '<strong>' + escapeHtml(headers[c]) + '</strong>' : '';
+        var value = cells[c] || '';
+        if (label && value) parts.push(label + ': ' + formatInlineMarkdown(value));
+        else if (value) parts.push(formatInlineMarkdown(value));
+      }
+      html += '<li>' + parts.join(' &mdash; ') + '</li>';
+    }
+    html += '</ul>';
+    return html;
+  }
   function renderMessageHtml(content){
-    var lines = normalizeMessageText(content).split('\n');
-    var parts = [];
-    var listItems = [];
-
-    function flushList(){
-      if (!listItems.length) return;
-      parts.push('<ul>' + listItems.map(function(item){ return '<li>' + item + '</li>'; }).join('') + '</ul>');
-      listItems = [];
-    }
-
-    for (var i = 0; i < lines.length; i++) {
+    var text = normalizeMessageText(content);
+    var lines = text.split('\n');
+    var out = '';
+    var i = 0;
+    while (i < lines.length) {
       var raw = lines[i];
-      var trimmed = raw.trim();
+      var t = raw.trim();
+      if (!t) { i++; continue; }
 
-      if (!trimmed) {
-        flushList();
+      // Code blocks (```)
+      if (t.indexOf('```') === 0) {
+        var lang = t.slice(3).trim();
+        var codeLines = [];
+        i++;
+        while (i < lines.length && lines[i].trim().indexOf('```') !== 0) {
+          codeLines.push(lines[i]);
+          i++;
+        }
+        i++;
+        var langAttr = lang ? ' data-lang="' + escapeHtml(lang) + '"' : '';
+        out += '<pre' + langAttr + '><code>' + escapeHtml(codeLines.join('\n')) + '</code></pre>';
         continue;
       }
 
-      var bulletMatch = trimmed.match(/^[-*]\s+(.*)$/);
-      if (bulletMatch) {
-        listItems.push(formatInlineMarkdown(escapeHtml(bulletMatch[1])));
+      // Headings (# ## ###)
+      var hMatch = t.match(/^(#{1,3})\s+(.+)/);
+      if (hMatch) {
+        var level = hMatch[1].length;
+        out += '<h' + level + '>' + formatInlineMarkdown(hMatch[2]) + '</h' + level + '>';
+        i++; continue;
+      }
+
+      // Blockquotes (>)
+      if (t[0] === '>' && (t[1] === ' ' || t.length === 1)) {
+        var qLines = [];
+        while (i < lines.length && lines[i].trim()[0] === '>') {
+          qLines.push(lines[i].trim().replace(/^>\s?/, ''));
+          i++;
+        }
+        out += '<blockquote><p>' + formatInlineMarkdown(qLines.join('\n')) + '</p></blockquote>';
         continue;
       }
 
-      var numberedMatch = trimmed.match(/^(\d+)\.\s+(.*)$/);
-      if (numberedMatch) {
-        flushList();
-        parts.push('<p><span class="helix-num">' + numberedMatch[1] + '.</span> ' + formatInlineMarkdown(escapeHtml(numberedMatch[2])) + '</p>');
+      // Horizontal rules (---, ***, ___)
+      if (t.match(/^(-{3,}|\*{3,}|_{3,})$/)) {
+        out += '<hr>';
+        i++; continue;
+      }
+
+      // Tables (| col | col | with separator row)
+      if (t.indexOf('|') !== -1 && i + 1 < lines.length) {
+        var sep = lines[i + 1].trim();
+        if (sep.match(/^\|?[\s:-]+\|[\s|:-]+\|?$/)) {
+          var tableRows = [t, sep];
+          i += 2;
+          while (i < lines.length && lines[i].trim().indexOf('|') !== -1) {
+            tableRows.push(lines[i].trim());
+            i++;
+          }
+          out += renderTableAsBullets(tableRows);
+          continue;
+        }
+      }
+
+      // Ordered lists
+      if (t.match(/^\d+\.\s/)) {
+        out += '<ol>';
+        while (i < lines.length && lines[i].trim().match(/^\d+\.\s/)) {
+          var oItem = lines[i].trim().replace(/^\d+\.\s*/, '');
+          out += '<li>' + formatInlineMarkdown(oItem) + '</li>';
+          i++;
+        }
+        out += '</ol>';
         continue;
       }
 
-      flushList();
-      parts.push('<p>' + formatInlineMarkdown(escapeHtml(trimmed)) + '</p>');
+      // Unordered lists
+      if (t.match(/^[-*]\s/)) {
+        out += '<ul>';
+        while (i < lines.length && lines[i].trim().match(/^[-*]\s/)) {
+          var uItem = lines[i].trim().replace(/^[-*]\s*/, '');
+          out += '<li>' + formatInlineMarkdown(uItem) + '</li>';
+          i++;
+        }
+        out += '</ul>';
+        continue;
+      }
+
+      out += '<p>' + formatInlineMarkdown(t) + '</p>';
+      i++;
     }
-
-    flushList();
-    return parts.join('') || '<p></p>';
+    return out || '<p></p>';
   }
   watchPageChanges();
 })();
@@ -1393,6 +1589,9 @@ JS;
         return $script;
     }
 
+    /**
+     * Serialize browser-collected page context into a plain-text block for the model prompt.
+     */
     private function buildPageContextText($pageContext): string
     {
         if (! is_array($pageContext)) {

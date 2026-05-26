@@ -670,6 +670,8 @@ function SettingsTab({ bot, onChange }: { bot: any; onChange: () => void }) {
     tone: bot.tone,
     collect_email: bot.collect_email,
     allowed_domains: bot.allowed_domains ?? [],
+    llm_provider: bot.llm_provider ?? 'ollama',
+    llm_model: bot.llm_model ?? '',
   });
   const [saving, setSaving] = useState(false);
   const [logoBusy, setLogoBusy] = useState(false);

@@ -641,7 +641,7 @@ function buildWidget(origin: string): string {
       .replace(/\n{3,}/g, '\n\n')
       .trim();
   }
-  function escapeRegExp(s){ return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+  function escapeRegExp(s){ return String(s || '').replace(/[.*+?^\u0024{}()|[\]\\]/g, '\\$&'); }
   function createAnchorHtml(url, label){
     return '<a href="' + escapeHtml(url) + '">' + label + '</a>';
   }
@@ -730,6 +730,28 @@ function buildWidget(origin: string): string {
     return result;
   }
 
+  function renderTableAsBullets(rows){
+    if (rows.length < 2) return '';
+    function splitCells(row){
+      return row.replace(/^\||\|$/g, '').split('|').map(function(c){ return c.trim(); });
+    }
+    var headers = splitCells(rows[0]);
+    var html = '<ul>';
+    for (var r = 2; r < rows.length; r++) {
+      var cells = splitCells(rows[r]);
+      var parts = [];
+      for (var c = 0; c < headers.length; c++) {
+        var label = headers[c] ? '<strong>' + escapeHtml(headers[c]) + '</strong>' : '';
+        var value = cells[c] || '';
+        if (label && value) parts.push(label + ': ' + formatInline(value));
+        else if (value) parts.push(formatInline(value));
+      }
+      html += '<li>' + parts.join(' &mdash; ') + '</li>';
+    }
+    html += '</ul>';
+    return html;
+  }
+
   function renderMessageHtml(content){
     var lines = normalizeMessageText(content).split('\n');
     var out = '';
@@ -769,6 +791,19 @@ function buildWidget(origin: string): string {
       if (t.match(/^(-{3,}|\*{3,}|_{3,})$/)) {
         out += '<hr>';
         i++; continue;
+      }
+      if (t.indexOf('|') !== -1 && i + 1 < lines.length) {
+        var sep = lines[i + 1].trim();
+        if (sep.match(/^\|?[\s:-]+\|[\s|:-]+\|?$/)) {
+          var tableRows = [t, sep];
+          i += 2;
+          while (i < lines.length && lines[i].trim().indexOf('|') !== -1) {
+            tableRows.push(lines[i].trim());
+            i++;
+          }
+          out += renderTableAsBullets(tableRows);
+          continue;
+        }
       }
       if (t.match(/^\d+\.\s/)) {
         out += '<ol>';

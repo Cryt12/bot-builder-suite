@@ -125,8 +125,10 @@ class ChatbotController extends Controller
         ]);
 
         $bot = Chatbot::create([
-            'user_id' => $user->id,
-            'name' => $data['name'],
+            'user_id'       => $user->id,
+            'name'          => $data['name'],
+            'llm_provider'  => config('models.llm.default_provider'),
+            'llm_model'     => config('models.llm.' . config('models.llm.default_provider') . '.model'),
         ]);
 
         return $this->json(['bot' => $this->serializeBot($request, $bot)], 201);
@@ -167,7 +169,18 @@ class ChatbotController extends Controller
             'widget_cache_minutes' => ['sometimes', 'integer', 'min:0', 'max:10080'],
             'regenerate_public_key' => ['sometimes', 'boolean'],
             'is_active' => ['sometimes', 'boolean'],
+            'llm_provider' => ['sometimes', Rule::in(['ollama', 'openrouter'])],
+            'llm_model' => ['sometimes', 'string', 'max:128'],
         ]);
+
+        // Auto-resolve default model when provider changes
+        if (array_key_exists('llm_provider', $data) && empty($data['llm_model'])) {
+            $provider = $data['llm_provider'];
+            $default  = config("models.llm.{$provider}.model") ?: config("services.{$provider}.model");
+            if ($default) {
+                $data['llm_model'] = $default;
+            }
+        }
 
         if (! Chatbot::supportsPublicRateLimit()) {
             unset($data['public_rate_limit_per_minute']);

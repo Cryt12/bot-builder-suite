@@ -38,6 +38,8 @@ class Chatbot extends Model
         'public_rate_limit_per_minute',
         'widget_cache_minutes',
         'is_active',
+        'llm_provider',
+        'llm_model',
     ];
 
     protected function casts(): array
@@ -67,6 +69,10 @@ class Chatbot extends Model
             if (self::supportsWidgetCacheMinutes()) {
                 $chatbot->widget_cache_minutes ??= 10;
             }
+
+            // Default provider/model to system defaults
+            $chatbot->llm_provider ??= config('models.llm.default_provider');
+            $chatbot->llm_model ??= config("models.llm.{$chatbot->llm_provider}.model");
         });
     }
 
