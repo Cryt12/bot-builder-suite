@@ -171,12 +171,12 @@ function buildWidget(origin: string): string {
 
   function extractMainText(){
     try {
-      var source = document.querySelector('main, [role="main"], .main-content, .content, #root main') || document.body;
+      var source = document.body;
       if (!source) return '';
       var clone = source.cloneNode(true);
       var remove = clone.querySelectorAll ? clone.querySelectorAll('script,style,noscript,iframe,svg,canvas,#helix-widget-root') : [];
       for (var i = 0; i < remove.length; i++) remove[i].remove();
-      return normalizeText(clone.innerText || clone.textContent || '', 12000);
+      return normalizeText(clone.innerText || clone.textContent || '', 48000);
     } catch (e) {
       return '';
     }
@@ -184,21 +184,25 @@ function buildWidget(origin: string): string {
 
   function buildSections(){
     var sections = [];
+    function pushSection(name, content){
+      var clean = normalizeText(content, 3800);
+      if (clean) sections.push({ name: name, content: clean });
+    }
     var h1 = normalizeText((document.querySelector('h1') || {}).innerText || '', 180);
     var subtitle = normalizeText((document.querySelector('h2, p') || {}).innerText || '', 280);
     var navItems = collectTexts(['aside a', 'nav a', '[role="navigation"] a', 'aside button'], 12);
     var headings = collectTexts(['main h1', 'main h2', 'main h3', '[role="main"] h1', '[role="main"] h2', '[role="main"] h3'], 12);
     var buttons = collectTexts(['main button', '[role="main"] button', 'main [role="button"]'], 10);
-    var listItems = collectTexts(['main li', '[role="main"] li', 'table tr'], 12);
+    var listItems = collectTexts(['main li', '[role="main"] li', 'table tr'], 50);
     var cards = collectTexts(['main article', 'main section', 'main [class*="card"]', '[role="main"] [class*="card"]'], 8);
 
-    if (h1) sections.push({ name: 'Primary heading', content: h1 });
-    if (subtitle && subtitle !== h1) sections.push({ name: 'Page summary', content: subtitle });
-    if (navItems.length) sections.push({ name: 'Navigation', content: navItems.join(' | ') });
-    if (headings.length) sections.push({ name: 'Visible sections', content: headings.join(' | ') });
-    if (buttons.length) sections.push({ name: 'Actions', content: buttons.join(' | ') });
-    if (listItems.length) sections.push({ name: 'Rows and items', content: listItems.join(' | ') });
-    if (cards.length) sections.push({ name: 'Cards and panels', content: cards.join(' | ') });
+    if (h1) pushSection('Primary heading', h1);
+    if (subtitle && subtitle !== h1) pushSection('Page summary', subtitle);
+    if (navItems.length) pushSection('Navigation', navItems.join(' | '));
+    if (headings.length) pushSection('Visible sections', headings.join(' | '));
+    if (buttons.length) pushSection('Actions', buttons.join(' | '));
+    if (listItems.length) pushSection('Rows and items', listItems.join(' | '));
+    if (cards.length) pushSection('Cards and panels', cards.join(' | '));
 
     return sections.slice(0, 12);
   }
@@ -414,11 +418,14 @@ function buildWidget(origin: string): string {
     var pageCtx = state.pageContext || getPageContext();
     fetch(ORIGIN + '/api/public/chat', {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+      headers: {
+        'Content-Type': 'text/plain;charset=UTF-8',
+        'Accept': 'application/json'
+      },
       body: JSON.stringify({ publicKey: publicKey, message: msg, conversationId: state.conversationId, visitorId: visitorId, visitorEmail: visitorEmail, history: history.slice(0, -1), pageContext: pageCtx })
     }).then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j};});}).then(function(res){
       state.sending = false;
-      if (!res.ok) { state.messages.push({ role:'assistant', content: res.j.error || 'Sorry, something went wrong.' }); }
+      if (!res.ok) { state.messages.push({ role:'assistant', content: res.j.error || res.j.message || 'Sorry, something went wrong.' }); }
       else {
         state.conversationId = res.j.conversationId;
         state.messages.push({ role:'assistant', content: res.j.reply });

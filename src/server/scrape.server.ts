@@ -175,6 +175,36 @@ function resolveUrl(base: string, href: string | null | undefined): string | nul
   }
 }
 
+function extractReadableBodyText($: cheerio.CheerioAPI): string {
+  const blocks: string[] = [];
+
+  $("body")
+    .find("h1,h2,h3,h4,h5,h6,p,li,blockquote,tr")
+    .each((_, el) => {
+      const tag = (el.tagName || "").toLowerCase();
+      let text = "";
+
+      if (tag === "tr") {
+        text = $(el)
+          .find("th,td")
+          .map((__, cell) => normalizeSpace($(cell).text()))
+          .get()
+          .filter(Boolean)
+          .join(" | ");
+      } else {
+        text = normalizeSpace($(el).text());
+      }
+
+      if (text) blocks.push(text);
+    });
+
+  if (blocks.length > 0) {
+    return blocks.join("\n");
+  }
+
+  return normalizeSpace($("body").text());
+}
+
 // ==== HTML Scraping Functions ====
 
 /**
@@ -277,7 +307,7 @@ async function scrapePageText(url: string, timeoutMs: number = 30000): Promise<{
     $("script, style, noscript, iframe, nav, footer, header, .sidebar, .menu, .navigation, .ad, .ads").remove();
 
     const title = ($("title").first().text() || url).trim();
-    const bodyText = $("body").text().replace(/\s+/g, " ").trim();
+    const bodyText = extractReadableBodyText($);
 
     return { title, text: bodyText, html };
   } catch (err: any) {

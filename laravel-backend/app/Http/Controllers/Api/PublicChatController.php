@@ -81,7 +81,7 @@ class PublicChatController extends Controller
             'pageContext.pageTitle' => ['nullable', 'string', 'max:500'],
             'pageContext.pageName' => ['nullable', 'string', 'max:500'],
             'pageContext.pageUrl' => ['nullable', 'string', 'max:2000'],
-            'pageContext.pageContent' => ['nullable', 'string', 'max:16000'],
+            'pageContext.pageContent' => ['nullable', 'string', 'max:50000'],
             'pageContext.scrapedAt' => ['nullable', 'string', 'max:100'],
             'pageContext.pageSections' => ['nullable', 'array', 'max:20'],
             'pageContext.pageSections.*.name' => ['required_with:pageContext.pageSections', 'string', 'max:200'],
@@ -398,6 +398,8 @@ class PublicChatController extends Controller
             "The user may refer to the live page indirectly using phrases like 'this page', 'this webpage', 'this screen', 'here', 'the current page', or 'where I am now'.",
             'When that happens, answer using the CURRENT PAGE CONTEXT first, then supplement with the knowledge base if it helps.',
             'If CURRENT PAGE CONTEXT is present, never say that you cannot see the page or that you do not know what page the user means.',
+            'If the user asks a counting question (how many, total, count, number of), count explicitly from the context you can see and do not estimate.',
+            'If the exact count cannot be verified from the provided context, say so instead of guessing.',
             'If the user asks to explain the current page, describe its purpose, important visible sections, and what the user can do there.',
         ];
 
@@ -563,7 +565,7 @@ class PublicChatController extends Controller
                 ->where('knowledge_sources.status', 'ready')
                 ->whereRaw("document_chunks.tsv @@ websearch_to_tsquery('english', ?)", [$query])
                 ->orderByDesc('rank')
-                ->limit(6)
+                ->limit(8)
                 ->get();
 
             foreach ($rows as $row) {
@@ -581,7 +583,7 @@ class PublicChatController extends Controller
 
         return collect($results)
             ->sortByDesc(fn ($row) => (float) ($row->rank ?? 0))
-            ->take(4)
+            ->take(8)
             ->values()
             ->all();
     }
@@ -632,7 +634,7 @@ class PublicChatController extends Controller
             ->orderByDesc('term_matches')
             ->orderByDesc('knowledge_sources.created_at')
             ->orderBy('document_chunks.chunk_index')
-            ->limit(4)
+            ->limit(8)
             ->get()
             ->all();
     }
@@ -900,7 +902,7 @@ class PublicChatController extends Controller
       for (var j = 0; j < nodes.length; j++) {
         var el = nodes[j];
         if (!el || (el.closest && el.closest('#helix-widget-root'))) continue;
-        var text = normalizeText(el.innerText || el.textContent || '', 240);
+        var text = normalizeText(el.innerText || el.textContent || '', 1000);
         if (text) values.push(text);
       }
     }
@@ -909,12 +911,12 @@ class PublicChatController extends Controller
 
   function extractMainText(){
     try {
-      var source = document.querySelector('main, [role="main"], .main-content, .content, #root main') || document.body;
+      var source = document.body;
       if (!source) return '';
       var clone = source.cloneNode(true);
       var remove = clone.querySelectorAll ? clone.querySelectorAll('script,style,noscript,iframe,svg,canvas,#helix-widget-root') : [];
       for (var i = 0; i < remove.length; i++) remove[i].remove();
-      return normalizeText(clone.innerText || clone.textContent || '', 12000);
+      return normalizeText(clone.innerText || clone.textContent || '', 48000);
     } catch (e) {
       return '';
     }
@@ -922,21 +924,25 @@ class PublicChatController extends Controller
 
   function buildSections(){
     var sections = [];
+    function pushSection(name, content){
+      var clean = normalizeText(content, 3800);
+      if (clean) sections.push({ name: name, content: clean });
+    }
     var h1 = normalizeText((document.querySelector('h1') || {}).innerText || '', 180);
     var subtitle = normalizeText((document.querySelector('h2, p') || {}).innerText || '', 280);
     var navItems = collectTexts(['aside a', 'nav a', '[role="navigation"] a', 'aside button'], 12);
     var headings = collectTexts(['main h1', 'main h2', 'main h3', '[role="main"] h1', '[role="main"] h2', '[role="main"] h3'], 12);
     var buttons = collectTexts(['main button', '[role="main"] button', 'main [role="button"]'], 10);
-    var listItems = collectTexts(['main li', '[role="main"] li', 'table tr'], 12);
+    var listItems = collectTexts(['main li', '[role="main"] li', 'table tr'], 50);
     var cards = collectTexts(['main article', 'main section', 'main [class*="card"]', '[role="main"] [class*="card"]'], 8);
 
-    if (h1) sections.push({ name: 'Primary heading', content: h1 });
-    if (subtitle && subtitle !== h1) sections.push({ name: 'Page summary', content: subtitle });
-    if (navItems.length) sections.push({ name: 'Navigation', content: navItems.join(' | ') });
-    if (headings.length) sections.push({ name: 'Visible sections', content: headings.join(' | ') });
-    if (buttons.length) sections.push({ name: 'Actions', content: buttons.join(' | ') });
-    if (listItems.length) sections.push({ name: 'Rows and items', content: listItems.join(' | ') });
-    if (cards.length) sections.push({ name: 'Cards and panels', content: cards.join(' | ') });
+    if (h1) pushSection('Primary heading', h1);
+    if (subtitle && subtitle !== h1) pushSection('Page summary', subtitle);
+    if (navItems.length) pushSection('Navigation', navItems.join(' | '));
+    if (headings.length) pushSection('Visible sections', headings.join(' | '));
+    if (buttons.length) pushSection('Actions', buttons.join(' | '));
+    if (listItems.length) pushSection('Rows and items', listItems.join(' | '));
+    if (cards.length) pushSection('Cards and panels', cards.join(' | '));
 
     return sections.slice(0, 12);
   }
@@ -1242,11 +1248,14 @@ class PublicChatController extends Controller
     var pageCtx = state.pageContext || getPageContext();
     fetch(ORIGIN + '/api/public/chat', {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+      headers: {
+        'Content-Type': 'text/plain;charset=UTF-8',
+        'Accept': 'application/json'
+      },
       body: JSON.stringify({ publicKey: publicKey, message: msg, conversationId: state.conversationId, visitorId: visitorId, visitorEmail: visitorEmail, history: history.slice(0, -1), pageContext: pageCtx })
     }).then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j};});}).then(function(res){
       state.sending = false;
-      if (!res.ok) { state.messages.push({ role:'assistant', content: res.j.error || 'Sorry, something went wrong.' }); }
+      if (!res.ok) { state.messages.push({ role:'assistant', content: res.j.error || res.j.message || 'Sorry, something went wrong.' }); }
       else {
         state.conversationId = res.j.conversationId;
         state.messages.push({ role:'assistant', content: res.j.reply });

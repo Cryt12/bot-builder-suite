@@ -10,6 +10,10 @@ export function getLaravelOrigin() {
   return API_BASE_URL.replace(/\/api$/, "");
 }
 
+export function getLaravelApiBaseUrl() {
+  return API_BASE_URL;
+}
+
 export interface LaravelUser {
   id: string;
   name: string | null;

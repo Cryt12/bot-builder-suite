@@ -1,4 +1,4 @@
-import { authStorage, laravelRequest } from "@/lib/laravel-api";
+import { authStorage, getLaravelApiBaseUrl, laravelRequest } from "@/lib/laravel-api";
 
 type FnArgs<T> = { data: T };
 
@@ -69,7 +69,7 @@ export async function deleteSource({ data }: FnArgs<{ id: string }>) {
 }
 
 export async function downloadSourceChunks({ data }: FnArgs<{ id: string; name: string }>) {
-  const response = await fetch(`${getApiBaseUrl()}/sources/${data.id}/chunks/download`, {
+  const response = await fetch(`${getLaravelApiBaseUrl()}/sources/${data.id}/chunks/download`, {
     method: "GET",
     headers: {
       Accept: "text/plain",
@@ -110,10 +110,6 @@ function sanitizeFilename(value: string) {
     .replace(/^-|-$/g, "") || "source";
 }
 
-function getApiBaseUrl() {
-  const envBase = import.meta.env.VITE_LARAVEL_API_URL?.replace(/\/$/, "");
-  return envBase || "/api";
-}
 
 export async function ingestUrl({ data }: FnArgs<{ chatbotId: string; url: string }>) {
   return laravelRequest<{ sourceId: string; chunks: number }>(`/chatbots/${data.chatbotId}/sources/url`, {

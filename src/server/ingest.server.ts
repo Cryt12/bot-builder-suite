@@ -1,10 +1,18 @@
 // Text chunking + URL fetching + file parsing helpers (server-only)
 import * as cheerio from "cheerio";
 
+function normalizeSpace(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
 export function chunkText(text: string, opts: { size?: number; overlap?: number } = {}): string[] {
   const size = opts.size ?? 1000;
   const overlap = opts.overlap ?? 150;
-  const clean = text.replace(/\s+/g, " ").trim();
+  const clean = text
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t\f\v]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
   if (!clean) return [];
   const chunks: string[] = [];
   let i = 0;
@@ -24,6 +32,36 @@ export function chunkText(text: string, opts: { size?: number; overlap?: number 
   return chunks.filter((c) => c.length > 20);
 }
 
+function extractReadableBodyText($: cheerio.CheerioAPI): string {
+  const blocks: string[] = [];
+
+  $("body")
+    .find("h1,h2,h3,h4,h5,h6,p,li,blockquote,tr")
+    .each((_, el) => {
+      const tag = (el.tagName || "").toLowerCase();
+      let text = "";
+
+      if (tag === "tr") {
+        text = $(el)
+          .find("th,td")
+          .map((__, cell) => normalizeSpace($(cell).text()))
+          .get()
+          .filter(Boolean)
+          .join(" | ");
+      } else {
+        text = normalizeSpace($(el).text());
+      }
+
+      if (text) blocks.push(text);
+    });
+
+  if (blocks.length > 0) {
+    return blocks.join("\n");
+  }
+
+  return normalizeSpace($("body").text());
+}
+
 export async function fetchUrlText(url: string): Promise<{ title: string; text: string }> {
   const res = await fetch(url, {
     headers: {
@@ -37,7 +75,7 @@ export async function fetchUrlText(url: string): Promise<{ title: string; text: 
   const $ = cheerio.load(html);
   $("script, style, noscript, iframe, nav, footer, header").remove();
   const title = ($("title").first().text() || url).trim();
-  const text = $("body").text().replace(/\s+/g, " ").trim();
+  const text = extractReadableBodyText($);
   return { title, text };
 }
 
