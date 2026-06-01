@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
+    "postbuild": "cp -n dist/tanstack_start_app/assets/* dist/client/assets/ 2>/dev/null || true",
     "build:dev": "vite build --mode development",
+    "deploy:frontend": "sudo systemctl restart helix-frontend",
     "preview": "vite preview",
     "lint": "eslint .",
     "format": "prettier --write ."

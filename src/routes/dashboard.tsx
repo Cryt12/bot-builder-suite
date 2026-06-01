@@ -49,7 +49,7 @@ function DashboardLayout() {
         className={`${collapsed ? "w-[72px]" : "w-60"} shrink-0 border-r border-border bg-sidebar flex flex-col transition-[width] duration-200 relative`}
       >
         <div className="flex items-center gap-2 p-5 border-b border-sidebar-border h-[72px]">
-          <Link to="/" className="flex items-center gap-2 font-display font-extrabold text-xl">
+          <Link to="/dashboard" className="flex items-center gap-2 font-display font-extrabold text-xl">
             <AppLogo
               imageClassName="h-8 w-8 shadow-glow"
               textClassName="bg-gradient-to-r from-primary to-primary-glow bg-clip-text text-xl font-extrabold tracking-wide text-transparent"

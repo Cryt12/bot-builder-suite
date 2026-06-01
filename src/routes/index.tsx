@@ -1,8 +1,9 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
 import { Button } from "@/components/ui/button";
+import { useAuth } from "@/lib/auth-context";
 import { AppLogo } from "@/components/app-logo";
-import { ArrowRight, Code2, Database, MessageSquare, Shield, Sparkles, Upload, Zap } from "lucide-react";
+import { ArrowRight, Code2, Database, Loader2, MessageSquare, Shield, Sparkles, Upload, Zap } from "lucide-react";
 
 export const Route = createFileRoute("/")({
   component: Landing,
@@ -19,7 +20,15 @@ export const Route = createFileRoute("/")({
 });
 
 function Landing() {
+  const navigate = useNavigate();
+  const { user, loading } = useAuth();
+
   useEffect(() => {
+    if (!loading && user) navigate({ to: "/dashboard" });
+  }, [loading, navigate, user]);
+
+  useEffect(() => {
+    if (loading || user) return;
     const els = document.querySelectorAll<HTMLElement>(".reveal");
     const io = new IntersectionObserver(
       (entries) => {
@@ -34,7 +43,15 @@ function Landing() {
     );
     els.forEach((el) => io.observe(el));
     return () => io.disconnect();
-  }, []);
+  }, [loading, user]);
+
+  if (loading || user) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-background bg-gradient-hero">
@@ -188,7 +205,6 @@ function Landing() {
       </section>
 
       {/* CTA */}
-      <span id="stack" className="block scroll-mt-24" />
       <section className="mx-auto max-w-7xl px-6 py-24">
         <div className="rounded-3xl border border-border-strong bg-gradient-card p-12 md:p-16 text-center relative overflow-hidden">
           <div className="absolute inset-0 bg-gradient-hero opacity-60" />

@@ -815,7 +815,7 @@ class PublicChatController extends Controller
     '.helix-msg.user{color:#fff;align-self:flex-end;border-top-right-radius:8px;box-shadow:0 12px 30px rgba(15,23,42,0.14)}',
     '.helix-msg p{margin:0 0 0.6em;line-height:1.65}',
     '.helix-msg p:last-child{margin-bottom:0}',
-    '.helix-msg ul{margin:0.4em 0 0.75em 1.1em;padding:0;list-style:disc}',
+    '.helix-msg ul,.helix-msg ol{margin:0.4em 0 0.75em;padding-left:1.25em;list-style-position:inside}',
     '.helix-msg ul li{margin:0.25em 0;line-height:1.5}',
     '.helix-msg strong{font-weight:700;color:#1e293b}',
     '.helix-msg a{color:#3b82f6;text-decoration:underline;text-underline-offset:2px}',

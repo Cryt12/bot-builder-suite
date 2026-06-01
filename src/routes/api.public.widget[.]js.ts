@@ -69,7 +69,7 @@ function buildWidget(origin: string): string {
     '.helix-msg h1,.helix-msg h2,.helix-msg h3{font-weight:600;line-height:1.3;margin:1em 0 0.4em;color:#0f172a}',
     '.helix-msg h1{font-size:1.15em}.helix-msg h2{font-size:1.05em}.helix-msg h3{font-size:0.95em}',
     '.helix-msg h1:first-child,.helix-msg h2:first-child,.helix-msg h3:first-child{margin-top:0}',
-    '.helix-msg ul,.helix-msg ol{margin:0.3em 0 0.6em;padding-left:1.5em}',
+    '.helix-msg ul,.helix-msg ol{margin:0.3em 0 0.6em;padding-left:1.25em;list-style-position:inside}',
     '.helix-msg li{margin:0.15em 0}',
     '.helix-msg strong{font-weight:600;color:#0f172a}',
     '.helix-msg em{font-style:italic}',

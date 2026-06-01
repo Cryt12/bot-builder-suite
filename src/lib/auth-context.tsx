@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useState, ReactNode } from "react";
 import { authStorage, laravelRequest, type LaravelUser } from "@/lib/laravel-api";
 
 interface AuthCtx {
@@ -16,6 +16,9 @@ const Ctx = createContext<AuthCtx>({
   refreshUser: async () => {},
   signOut: async () => {},
 });
+
+const IDLE_LOGOUT_MS = 20 * 60 * 1000;
+const ACTIVITY_EVENTS = ["mousemove", "mousedown", "keydown", "touchstart", "scroll", "wheel"] as const;
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<LaravelUser | null>(null);
@@ -49,6 +52,43 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     refreshUser();
   }, []);
 
+  const signOut = useCallback(async () => {
+    const savedToken = authStorage.getToken();
+    authStorage.clear();
+    setToken(null);
+    setUser(null);
+
+    if (savedToken) {
+      await laravelRequest("/auth/logout", { method: "POST", token: savedToken }).catch(() => {});
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!token || !user) return;
+
+    let timeoutId = window.setTimeout(() => {
+      void signOut();
+    }, IDLE_LOGOUT_MS);
+
+    const resetIdleTimer = () => {
+      window.clearTimeout(timeoutId);
+      timeoutId = window.setTimeout(() => {
+        void signOut();
+      }, IDLE_LOGOUT_MS);
+    };
+
+    ACTIVITY_EVENTS.forEach((eventName) => {
+      window.addEventListener(eventName, resetIdleTimer, { passive: true });
+    });
+
+    return () => {
+      window.clearTimeout(timeoutId);
+      ACTIVITY_EVENTS.forEach((eventName) => {
+        window.removeEventListener(eventName, resetIdleTimer);
+      });
+    };
+  }, [signOut, token, user]);
+
   return (
     <Ctx.Provider
       value={{
@@ -56,15 +96,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         token,
         loading,
         refreshUser,
-        signOut: async () => {
-          const savedToken = authStorage.getToken();
-          if (savedToken) {
-            await laravelRequest("/auth/logout", { method: "POST", token: savedToken }).catch(() => {});
-          }
-          authStorage.clear();
-          setToken(null);
-          setUser(null);
-        },
+        signOut,
       }}
     >
       {children}

@@ -14,6 +14,7 @@ use Illuminate\Http\Response;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Symfony\Component\Process\Process;
@@ -154,7 +155,12 @@ class ChatbotController extends Controller
     {
         $this->authorizeOwner($request, $chatbot);
 
-        $data = $request->validate([
+        $payload = $request->all();
+        if (array_key_exists('llm_model', $payload) && ! is_string($payload['llm_model'])) {
+            unset($payload['llm_model']);
+        }
+
+        $data = Validator::make($payload, [
             'name' => ['sometimes', 'string', 'min:1', 'max:80'],
             'welcome_message' => ['sometimes', 'string', 'max:500'],
             'system_prompt' => ['sometimes', 'string', 'max:4000'],
@@ -171,7 +177,7 @@ class ChatbotController extends Controller
             'is_active' => ['sometimes', 'boolean'],
             'llm_provider' => ['sometimes', Rule::in(['ollama', 'openrouter'])],
             'llm_model' => ['sometimes', 'string', 'max:128'],
-        ]);
+        ])->validate();
 
         // Auto-resolve default model when provider changes
         if (array_key_exists('llm_provider', $data) && empty($data['llm_model'])) {
@@ -720,7 +726,21 @@ class ChatbotController extends Controller
         }
 
         $relativePath = '/storage/' . ltrim($path, '/');
-        $origin = $request->getSchemeAndHttpHost();
+        $forwardedProto = trim((string) $request->headers->get('X-Forwarded-Proto'));
+        $forwardedHost = trim((string) $request->headers->get('X-Forwarded-Host'));
+        $forwardedOrigin = $forwardedProto !== '' && $forwardedHost !== ''
+            ? rtrim($forwardedProto . '://' . $forwardedHost, '/')
+            : '';
+        $fallbackOrigin = rtrim($request->getSchemeAndHttpHost(), '/');
+        $appOrigin = rtrim((string) config('app.url', ''), '/');
+
+        foreach ([$appOrigin, $forwardedOrigin, $fallbackOrigin] as $origin) {
+            if ($origin !== '' && ! preg_match('/^(https?:\/\/)?(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?$/i', $origin)) {
+                return rtrim($origin, '/') . $relativePath;
+            }
+        }
+
+        $origin = $appOrigin !== '' ? $appOrigin : $fallbackOrigin;
 
         return rtrim($origin, '/') . $relativePath;
     }

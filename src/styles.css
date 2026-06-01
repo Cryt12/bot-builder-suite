@@ -171,4 +171,7 @@ html { color-scheme: dark; scroll-behavior: smooth; }
       linear-gradient(to bottom, oklch(1 0 0 / 0.04) 1px, transparent 1px);
     background-size: 32px 32px;
   }
+  .animate-scroll {
+    animation: scroll 30s linear infinite;
+  }
 }

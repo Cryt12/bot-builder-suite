@@ -670,17 +670,29 @@ function SettingsTab({ bot, onChange }: { bot: any; onChange: () => void }) {
     tone: bot.tone,
     collect_email: bot.collect_email,
     allowed_domains: bot.allowed_domains ?? [],
-    llm_provider: bot.llm_provider ?? 'ollama',
-    llm_model: bot.llm_model ?? '',
+    llm_provider: typeof bot.llm_provider === "string" ? bot.llm_provider : "ollama",
+    llm_model: typeof bot.llm_model === "string" ? bot.llm_model : "",
   });
   const [saving, setSaving] = useState(false);
   const [logoBusy, setLogoBusy] = useState(false);
 
   async function save() {
     setSaving(true);
-    try { await updateBot({ data: { id: bot.id, ...form } }); toast.success("Saved"); onChange(); }
-    catch (e: any) { toast.error(e.message); }
-    finally { setSaving(false); }
+    try {
+      const { llm_provider, llm_model, ...rest } = form;
+      const payload: Record<string, any> = { id: bot.id, ...rest };
+
+      if (typeof llm_provider === "string") payload.llm_provider = llm_provider;
+      if (typeof llm_model === "string") payload.llm_model = llm_model;
+
+      await updateBot({ data: payload });
+      toast.success("Saved");
+      onChange();
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function remove() {
