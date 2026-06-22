@@ -40,4 +40,9 @@ return [
         'model'   => env('OPENROUTER_MODEL', 'google/gemma-4:mini'),
     ],
 
+    'google' => [
+        'client_id' => env('GOOGLE_CLIENT_ID'),
+        'client_secret' => env('GOOGLE_CLIENT_SECRET'),
+    ],
+
 ];

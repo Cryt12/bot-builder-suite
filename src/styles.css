@@ -119,16 +119,94 @@ html { color-scheme: dark; scroll-behavior: smooth; }
   html { scroll-behavior: auto; }
 }
 
+
+.landing-parallax ~ section,
+.landing-parallax ~ footer {
+  position: relative;
+  z-index: 1;
+}
+
+.landing-parallax {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  min-height: 120%;
+  background-image:
+    linear-gradient(115deg, transparent 0 28%, oklch(0.73 0.14 230.62 / 0.06) 28% 29%, transparent 29% 100%),
+    linear-gradient(to right, oklch(1 0 0 / 0.025) 1px, transparent 1px),
+    linear-gradient(to bottom, oklch(1 0 0 / 0.02) 1px, transparent 1px);
+  background-size: 100% 100%, 72px 72px, 72px 72px;
+  opacity: 0.7;
+  transform: translate3d(0, 0, 0);
+  will-change: transform;
+}
+
+.stack-runner {
+  overflow: hidden;
+  border-block: 1px solid var(--color-border);
+  -webkit-mask-image: linear-gradient(to right, transparent, black 12%, black 88%, transparent);
+  mask-image: linear-gradient(to right, transparent, black 12%, black 88%, transparent);
+}
+.stack-track {
+  display: flex;
+  width: max-content;
+  gap: 1rem;
+  padding: 1rem 0;
+  animation: stack-runner 32s linear infinite;
+}
+.stack-runner:hover .stack-track {
+  animation-play-state: paused;
+}
+.stack-logo-card {
+  display: flex;
+  min-width: 12rem;
+  align-items: center;
+  gap: 0.85rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: linear-gradient(180deg, oklch(0.21 0.015 270 / 0.92), oklch(0.18 0.013 270 / 0.92));
+  padding: 1rem 1.1rem;
+  color: var(--color-foreground);
+  font-weight: 650;
+  box-shadow: var(--shadow-sm);
+}
+.stack-logo-card img {
+  filter: drop-shadow(0 8px 18px oklch(0 0 0 / 0.35));
+}
+@keyframes stack-runner {
+  from { transform: translateX(0); }
+  to { transform: translateX(calc(-50% - 0.5rem)); }
+}
+
 /* Reveal on scroll */
 .reveal {
   opacity: 0;
-  transform: translateY(24px);
-  transition: opacity 700ms cubic-bezier(0.4, 0, 0.2, 1), transform 700ms cubic-bezier(0.4, 0, 0.2, 1);
+  transform: translateY(32px) scale(0.98);
+  transition:
+    opacity 850ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 850ms cubic-bezier(0.16, 1, 0.3, 1);
   will-change: opacity, transform;
 }
 .reveal.is-visible {
   opacity: 1;
-  transform: translateY(0);
+  transform: translateY(0) scale(1);
+}
+@media (prefers-reduced-motion: reduce) {
+  .landing-parallax {
+    transform: none !important;
+  }
+  .stack-track {
+    animation: none;
+    flex-wrap: wrap;
+    justify-content: center;
+    width: 100%;
+  }
+  .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
 }
 
 @layer base {

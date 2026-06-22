@@ -25,4 +25,15 @@ return [
             'model' => env('OPENROUTER_MODEL', 'google/gemma-4:mini'),
         ],
     ],
+
+    'embeddings' => [
+        'timeout' => env('EMBEDDING_TIMEOUT', 30),
+        'max_input_chars' => env('EMBEDDING_MAX_INPUT_CHARS', 4000),
+        'min_similarity' => env('EMBEDDING_MIN_SIMILARITY', 0.35),
+
+        'ollama' => [
+            'url' => env('OLLAMA_URL', 'http://127.0.0.1:11434'),
+            'model' => env('EMBEDDING_MODEL', 'nomic-embed-text'),
+        ],
+    ],
 ];

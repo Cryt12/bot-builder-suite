@@ -8,6 +8,7 @@ use App\Models\Conversation;
 use App\Models\DocumentChunk;
 use App\Models\KnowledgeSource;
 use App\Models\Message;
+use App\Support\OllamaEmbeddings;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
@@ -560,12 +561,16 @@ class ChatbotController extends Controller
             abort_if(count($chunks) === 0, 422, 'No extractable text found.');
 
             foreach ($chunks as $index => $chunk) {
+                $content = $this->sanitizeUtf8($chunk);
+                $embedding = OllamaEmbeddings::embed($content);
+
                 DocumentChunk::create([
                     'source_id' => $source->id,
                     'chatbot_id' => $chatbot->id,
                     'user_id' => $chatbot->user_id,
-                    'content' => $this->sanitizeUtf8($chunk),
+                    'content' => $content,
                     'chunk_index' => $index,
+                    'embedding' => $embedding ? OllamaEmbeddings::toPgVector($embedding) : null,
                 ]);
             }
 

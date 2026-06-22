@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth-context";
 import { AppLogo } from "@/components/app-logo";
@@ -22,6 +22,18 @@ export const Route = createFileRoute("/")({
 function Landing() {
   const navigate = useNavigate();
   const { user, loading } = useAuth();
+  const parallaxRef = useRef<HTMLDivElement>(null);
+  const stackLogos = [
+    { name: "Next.js", logo: "https://cdn.simpleicons.org/nextdotjs/ffffff" },
+    { name: "React", logo: "https://cdn.simpleicons.org/react/61dafb" },
+    { name: "Vue", logo: "https://cdn.simpleicons.org/vuedotjs/4fc08d" },
+    { name: "WordPress", logo: "https://cdn.simpleicons.org/wordpress/21759b" },
+    { name: "PHP", logo: "https://cdn.simpleicons.org/php/777bb4" },
+    { name: "Laravel", logo: "https://cdn.simpleicons.org/laravel/ff2d20" },
+    { name: "Nuxt", logo: "https://cdn.simpleicons.org/nuxt/00dc82" },
+    { name: "Shopify", logo: "https://cdn.simpleicons.org/shopify/95bf47" },
+    { name: "HTML", logo: "https://cdn.simpleicons.org/html5/e34f26" },
+  ];
 
   useEffect(() => {
     if (!loading && user) navigate({ to: "/dashboard" });
@@ -45,6 +57,20 @@ function Landing() {
     return () => io.disconnect();
   }, [loading, user]);
 
+  useEffect(() => {
+    if (loading || user) return;
+    const parallax = parallaxRef.current;
+    if (!parallax) return;
+
+    const updateParallax = () => {
+      parallax.style.transform = `translate3d(0, ${window.scrollY * 0.08}px, 0)`;
+    };
+
+    updateParallax();
+    window.addEventListener("scroll", updateParallax, { passive: true });
+    return () => window.removeEventListener("scroll", updateParallax);
+  }, [loading, user]);
+
   if (loading || user) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
@@ -54,7 +80,8 @@ function Landing() {
   }
 
   return (
-    <div className="min-h-screen bg-background bg-gradient-hero">
+    <div className="relative min-h-screen overflow-hidden bg-background bg-gradient-hero">
+      <div ref={parallaxRef} className="landing-parallax" aria-hidden="true" />
       {/* Nav */}
       <header className="sticky top-0 z-40 border-b border-border/50 backdrop-blur-xl bg-background/60">
         <div className="mx-auto max-w-7xl px-6 h-16 flex items-center justify-between">
@@ -83,16 +110,16 @@ function Landing() {
       <section className="relative overflow-hidden">
         <div className="absolute inset-0 grid-bg opacity-40 [mask-image:radial-gradient(ellipse_at_center,black,transparent_70%)]" />
         <div className="relative mx-auto max-w-7xl px-6 pt-24 pb-32 text-center">
-          <h1 className="mt-8 font-display text-5xl md:text-7xl font-bold tracking-tight">
+          <h1 className="reveal mt-8 font-display text-5xl md:text-7xl font-bold tracking-tight">
             Ship AI chatbots that
             <br />
             <span className="text-gradient">actually know your stuff.</span>
           </h1>
-          <p className="mx-auto mt-6 max-w-2xl text-lg text-muted-foreground">
+          <p className="reveal mx-auto mt-6 max-w-2xl text-lg text-muted-foreground" style={{ transitionDelay: "80ms" }}>
             Upload your docs, paste a URL, and embed a smart chatbot on your site in minutes.
             No prompt engineering. No hallucinations. Just answers from your content.
           </p>
-          <div className="mt-10 flex items-center justify-center gap-3">
+          <div className="reveal mt-10 flex items-center justify-center gap-3" style={{ transitionDelay: "160ms" }}>
             <Link to="/auth" search={{ mode: "signup" }}>
               <Button size="lg" className="bg-gradient-primary text-primary-foreground hover:opacity-90 shadow-glow h-12 px-6">
                 Build your first bot <ArrowRight className="ml-2 h-4 w-4" />
@@ -106,7 +133,7 @@ function Landing() {
           </div>
 
           {/* Hero card preview */}
-          <div className="mt-20 relative mx-auto max-w-4xl">
+          <div className="reveal mt-20 relative mx-auto max-w-4xl" style={{ transitionDelay: "240ms" }}>
             <div className="absolute -inset-4 bg-gradient-primary opacity-20 blur-3xl rounded-3xl" />
             <div className="relative rounded-2xl border border-border-strong bg-gradient-card shadow-elegant overflow-hidden">
               <div className="flex items-center gap-1.5 px-4 py-3 border-b border-border">
@@ -148,7 +175,7 @@ function Landing() {
 
       {/* Features */}
       <section id="features" className="scroll-mt-24 mx-auto max-w-7xl px-6 py-24">
-        <div className="text-center max-w-2xl mx-auto">
+        <div className="reveal text-center max-w-2xl mx-auto">
           <h2 className="font-display text-4xl font-bold">Everything you need to launch.</h2>
           <p className="mt-4 text-muted-foreground">
             From ingestion to embedding to analytics — Helix handles the entire RAG pipeline.
@@ -181,7 +208,7 @@ function Landing() {
 
       {/* How it works */}
       <section id="how" className="scroll-mt-24 mx-auto max-w-7xl px-6 py-24 border-t border-border">
-        <div className="text-center max-w-2xl mx-auto">
+        <div className="reveal text-center max-w-2xl mx-auto">
           <h2 className="font-display text-4xl font-bold">From upload to embed in 4 steps.</h2>
         </div>
         <div className="mt-16 grid md:grid-cols-4 gap-6">
@@ -204,9 +231,32 @@ function Landing() {
         </div>
       </section>
 
+      {/* Stack */}
+      <section id="stack" className="scroll-mt-24 mx-auto max-w-7xl px-6 py-24 border-t border-border">
+        <div className="reveal mx-auto max-w-3xl text-center">
+          <h2 className="mt-5 font-display text-4xl font-bold">Use Helix anywhere your site runs.</h2>
+          <p className="mx-auto mt-4 max-w-2xl text-muted-foreground leading-relaxed">
+            Helix is framework-agnostic. Embed the widget or call the API from Next.js, React, Vue,
+            WordPress, PHP, Laravel, and many more.
+          </p>
+        </div>
+
+        <div className="reveal stack-runner mt-14" style={{ transitionDelay: "160ms" }}>
+          <div className="stack-track">
+            {[...stackLogos, ...stackLogos].map((stack, i) => (
+              <div key={stack.name + i} className="stack-logo-card">
+                <img src={stack.logo} alt="" loading="lazy" className="h-8 w-8 object-contain" />
+                <span>{stack.name}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+
       {/* CTA */}
       <section className="mx-auto max-w-7xl px-6 py-24">
-        <div className="rounded-3xl border border-border-strong bg-gradient-card p-12 md:p-16 text-center relative overflow-hidden">
+        <div className="reveal rounded-3xl border border-border-strong bg-gradient-card p-12 md:p-16 text-center relative overflow-hidden">
           <div className="absolute inset-0 bg-gradient-hero opacity-60" />
           <div className="relative">
             <h2 className="font-display text-4xl md:text-5xl font-bold">Ready to ship a smarter bot?</h2>

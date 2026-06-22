@@ -19,6 +19,7 @@ Route::options('/{any}', function (Request $request) {
 
 Route::post('/auth/register', [AuthController::class, 'register']);
 Route::post('/auth/login', [AuthController::class, 'login']);
+Route::post('/auth/google', [AuthController::class, 'google']);
 Route::get('/public/widget.js', [PublicChatController::class, 'widget']);
 Route::get('/public/bot/{apiKey}', [PublicChatController::class, 'bot']);
 Route::get('/public/logo/{apiKey}', [PublicChatController::class, 'logo']);

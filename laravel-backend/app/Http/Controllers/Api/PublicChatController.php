@@ -9,6 +9,7 @@ use App\Models\Conversation;
 use App\Models\DocumentChunk;
 use App\Models\KnowledgeSource;
 use App\Models\Message;
+use App\Support\OllamaEmbeddings;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
@@ -70,13 +71,13 @@ class PublicChatController extends Controller
         $data = validator($this->requestData($request), [
             'publicKey' => ['nullable', 'string'],
             'apiKey' => ['nullable', 'string'],
-            'message' => ['required', 'string', 'max:4000'],
+            'message' => ['required', 'string', 'max:12000'],
             'conversationId' => ['nullable', 'uuid'],
             'visitorId' => ['nullable', 'string', 'max:64'],
             'visitorEmail' => ['nullable', 'email', 'max:200'],
             'history' => ['nullable', 'array', 'max:10'],
             'history.*.role' => ['required_with:history', 'in:user,assistant'],
-            'history.*.content' => ['required_with:history', 'string', 'max:4000'],
+            'history.*.content' => ['required_with:history', 'string', 'max:12000'],
             'pageContext' => ['nullable', 'array'],
             'pageContext.pageTitle' => ['nullable', 'string', 'max:500'],
             'pageContext.pageName' => ['nullable', 'string', 'max:500'],
@@ -86,6 +87,33 @@ class PublicChatController extends Controller
             'pageContext.pageSections' => ['nullable', 'array', 'max:20'],
             'pageContext.pageSections.*.name' => ['required_with:pageContext.pageSections', 'string', 'max:200'],
             'pageContext.pageSections.*.content' => ['required_with:pageContext.pageSections', 'string', 'max:4000'],
+            'pageContext.pageOutline' => ['nullable', 'array', 'max:120'],
+            'pageContext.pageOutline.*' => ['nullable', 'string', 'max:700'],
+            'formContext' => ['nullable', 'array'],
+            'formContext.forms' => ['nullable', 'array', 'max:5'],
+            'formContext.forms.*.id' => ['nullable', 'string', 'max:120'],
+            'formContext.forms.*.selector' => ['nullable', 'string', 'max:300'],
+            'formContext.forms.*.label' => ['nullable', 'string', 'max:300'],
+            'formContext.forms.*.submitSelector' => ['nullable', 'string', 'max:300'],
+            'formContext.forms.*.fields' => ['nullable', 'array', 'max:40'],
+            'formContext.forms.*.fields.*.id' => ['nullable', 'string', 'max:120'],
+            'formContext.forms.*.fields.*.selector' => ['nullable', 'string', 'max:300'],
+            'formContext.forms.*.fields.*.tag' => ['nullable', 'string', 'max:20'],
+            'formContext.forms.*.fields.*.type' => ['nullable', 'string', 'max:40'],
+            'formContext.forms.*.fields.*.role' => ['nullable', 'string', 'max:60'],
+            'formContext.forms.*.fields.*.name' => ['nullable', 'string', 'max:200'],
+            'formContext.forms.*.fields.*.label' => ['nullable', 'string', 'max:300'],
+            'formContext.forms.*.fields.*.ariaLabel' => ['nullable', 'string', 'max:300'],
+            'formContext.forms.*.fields.*.placeholder' => ['nullable', 'string', 'max:300'],
+            'formContext.forms.*.fields.*.required' => ['nullable', 'boolean'],
+            'formContext.forms.*.fields.*.disabled' => ['nullable', 'boolean'],
+            'formContext.forms.*.fields.*.readOnly' => ['nullable', 'boolean'],
+            'formContext.forms.*.fields.*.contentEditable' => ['nullable', 'boolean'],
+            'formContext.forms.*.fields.*.value' => ['nullable', 'string', 'max:1000'],
+            'formContext.forms.*.fields.*.checked' => ['nullable', 'boolean'],
+            'formContext.forms.*.fields.*.options' => ['nullable', 'array', 'max:80'],
+            'formContext.forms.*.fields.*.options.*.value' => ['nullable', 'string', 'max:300'],
+            'formContext.forms.*.fields.*.options.*.label' => ['nullable', 'string', 'max:300'],
         ])->validate();
 
         if ($requirePublicKey) {
@@ -117,7 +145,9 @@ class PublicChatController extends Controller
             $data['message']
         );
 
-        $reply = $this->generateReply(
+        $agentResponse = $this->buildFormAgentResponse($bot, $data, $pageContext);
+
+        $reply = $agentResponse['reply'] ?? $this->generateReply(
             $this->buildSystemPrompt($bot, $pageContextText, $knowledgeContext),
             $this->buildChatMessages($data, $pageContext),
             $bot
@@ -139,6 +169,7 @@ class PublicChatController extends Controller
 
         return $this->json($request, [
             'reply' => $reply,
+            'agentAction' => $agentResponse['agentAction'] ?? null,
             'conversationId' => $conversation->id,
             'bot' => [
                 'name' => $bot->name,
@@ -386,6 +417,267 @@ class PublicChatController extends Controller
     }
 
     /**
+     * Return a structured browser action only when the user clearly asks Helix to fill a visible form.
+     */
+    private function buildFormAgentResponse(Chatbot $bot, array $data, ?array $pageContext): ?array
+    {
+        $message = trim((string) ($data['message'] ?? ''));
+        $forms = $data['formContext']['forms'] ?? [];
+
+        if (! is_array($forms) || count($forms) === 0) {
+            return null;
+        }
+
+        if (! $this->shouldUseFormAgent($data)) {
+            return null;
+        }
+
+        $formContext = [
+            'page' => [
+                'title' => $pageContext['pageTitle'] ?? null,
+                'name' => $pageContext['pageName'] ?? null,
+                'url' => $pageContext['pageUrl'] ?? null,
+            ],
+            'forms' => collect($forms)->take(5)->values()->all(),
+        ];
+
+        $system = implode("\n\n", [
+            'You are Helix form assistant. Return only valid JSON and no markdown.',
+            'Your job is to map the user request to visible, non-sensitive form fields supplied in FORM CONTEXT.',
+            'Never fill credit card, payment, OTP, captcha, token, government ID, or hidden fields. Password fields may be filled only when the user explicitly provides a password or asks to create/sign in to an account.',
+            'Use only field ids/selectors that appear in FORM CONTEXT. Do not invent selectors.',
+            'Fields can be native inputs, textareas, selects, contenteditable areas, or custom dropdown/combobox controls. For dropdowns, use a value that exactly matches one visible option label or value when options are supplied.',
+            'Do not plan values for disabled or read-only fields unless the same plan first selects another field that clearly enables them; otherwise ask for the prerequisite selection.',
+            'Use RECENT CHAT to resolve short follow-up answers. For example, if the assistant asked for an email and the user replies with an email address, fill the email field.',
+            'If the user gives one value and exactly one likely empty field is still needed, fill that field. If required values are missing, ask for them in reply and list them in missing.',
+            'The browser will never submit directly. If the user explicitly asks to submit after filling, set submit to true so the browser can ask for confirmation first.',
+            'Schema: {"type":"fill_form"|"ask"|"no_action","reply":"short user-facing reply","formId":"form id or null","fields":[{"fieldId":"field id","selector":"field selector","value":"string value","checked":true|false|null}],"missing":["field or value needed"],"submit":true|false}',
+        ]);
+
+        $recentChat = collect($data['history'] ?? [])
+            ->take(-8)
+            ->map(fn ($turn) => strtoupper((string) ($turn['role'] ?? 'message')) . ': ' . trim((string) ($turn['content'] ?? '')))
+            ->filter(fn ($turn) => trim($turn) !== '')
+            ->implode("\n");
+
+        $messages = [[
+            'role' => 'user',
+            'content' => "RECENT CHAT:\n{$recentChat}\n\nUSER REQUEST:\n{$message}\n\nFORM CONTEXT:\n" . json_encode($formContext, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+        ]];
+
+        try {
+            $raw = $this->generateReply($system, $messages, $bot);
+            $plan = $this->decodeJsonObject($raw);
+        } catch (\Throwable $e) {
+            report($e);
+            return null;
+        }
+
+        if (! is_array($plan)) {
+            return null;
+        }
+
+        $type = $plan['type'] ?? 'no_action';
+        if ($type === 'no_action') {
+            return [
+                'reply' => $this->describeDetectedForms($forms),
+            ];
+        }
+
+        $reply = trim((string) ($plan['reply'] ?? ''));
+        if ($reply === '') {
+            $reply = $type === 'ask'
+                ? 'I need a little more information before I can fill that form.'
+                : 'I can fill that form for you. Please review the fields after I update them.';
+        }
+
+        if ($type === 'ask') {
+            return ['reply' => $reply];
+        }
+
+        $allowedFields = collect($forms)
+            ->flatMap(fn ($form) => is_array($form['fields'] ?? null) ? $form['fields'] : [])
+            ->mapWithKeys(fn ($field) => [($field['id'] ?? '') => $field])
+            ->filter(fn ($field, $id) => is_string($id) && $id !== '')
+            ->all();
+
+        $allowedFieldsBySelector = collect($forms)
+            ->flatMap(fn ($form) => is_array($form['fields'] ?? null) ? $form['fields'] : [])
+            ->mapWithKeys(fn ($field) => [($field['selector'] ?? '') => $field])
+            ->filter(fn ($field, $selector) => is_string($selector) && $selector !== '')
+            ->all();
+
+        $allowedFieldsByAlias = collect($forms)
+            ->flatMap(fn ($form) => is_array($form['fields'] ?? null) ? $form['fields'] : [])
+            ->flatMap(function ($field) {
+                return collect([$field['label'] ?? null, $field['placeholder'] ?? null, $field['name'] ?? null])
+                    ->filter(fn ($alias) => is_string($alias) && trim($alias) !== '')
+                    ->mapWithKeys(fn ($alias) => [$this->normalizeFormFieldAlias($alias) => $field]);
+            })
+            ->filter(fn ($field, $alias) => is_string($alias) && $alias !== '')
+            ->all();
+
+        $fields = collect($plan['fields'] ?? [])
+            ->filter(fn ($field) => is_array($field))
+            ->map(function (array $field) use ($allowedFields, $allowedFieldsBySelector, $allowedFieldsByAlias) {
+                $fieldId = trim((string) ($field['fieldId'] ?? $field['id'] ?? ''));
+                $selectorFromPlan = trim((string) ($field['selector'] ?? ''));
+                $fieldAlias = $this->normalizeFormFieldAlias($fieldId);
+                $selectorAlias = $this->normalizeFormFieldAlias($selectorFromPlan);
+                $known = ($fieldId !== '' ? ($allowedFields[$fieldId] ?? null) : null)
+                    ?: ($selectorFromPlan !== '' ? ($allowedFieldsBySelector[$selectorFromPlan] ?? null) : null)
+                    ?: ($fieldAlias !== '' ? ($allowedFieldsByAlias[$fieldAlias] ?? null) : null)
+                    ?: ($selectorAlias !== '' ? ($allowedFieldsByAlias[$selectorAlias] ?? null) : null);
+
+                if (! is_array($known)) {
+                    return null;
+                }
+
+                $fieldId = trim((string) ($known['id'] ?? $fieldId));
+                $selector = trim((string) ($known['selector'] ?? $selectorFromPlan));
+                if ($selector === '') {
+                    return null;
+                }
+
+                $value = $field['value'] ?? null;
+                $checked = array_key_exists('checked', $field) ? (bool) $field['checked'] : null;
+
+                return [
+                    'fieldId' => $fieldId,
+                    'selector' => $selector,
+                    'value' => is_scalar($value) ? substr((string) $value, 0, 1000) : null,
+                    'checked' => $checked,
+                ];
+            })
+            ->filter()
+            ->take(30)
+            ->values()
+            ->all();
+
+        $formId = trim((string) ($plan['formId'] ?? ''));
+        $selectedForm = collect($forms)->first(fn ($form) => ($form['id'] ?? null) === $formId) ?? $forms[0] ?? [];
+
+        return [
+            'reply' => $reply,
+            'agentAction' => [
+                'type' => 'fill_form',
+                'formId' => $formId ?: ($selectedForm['id'] ?? null),
+                'formSelector' => $selectedForm['selector'] ?? null,
+                'submitSelector' => $selectedForm['submitSelector'] ?? null,
+                'fields' => $fields,
+                'missing' => collect($plan['missing'] ?? [])
+                    ->filter(fn ($item) => is_scalar($item) && trim((string) $item) !== '')
+                    ->map(fn ($item) => substr(trim((string) $item), 0, 200))
+                    ->take(12)
+                    ->values()
+                    ->all(),
+                'submit' => (bool) ($plan['submit'] ?? false),
+            ],
+        ];
+    }
+
+    private function normalizeFormFieldAlias(string $value): string
+    {
+        $alias = mb_strtolower(trim($value));
+        $alias = preg_replace('/[^\pL\pN]+/u', ' ', $alias) ?? $alias;
+
+        return trim(preg_replace('/\s+/u', ' ', $alias) ?? $alias);
+    }
+
+    private function describeDetectedForms(array $forms): string
+    {
+        $form = $forms[0] ?? [];
+        $label = trim((string) ($form['label'] ?? 'this form'));
+        $fields = collect($form['fields'] ?? [])
+            ->map(fn ($field) => trim((string) (($field['label'] ?? '') ?: ($field['placeholder'] ?? '') ?: ($field['name'] ?? ''))))
+            ->filter()
+            ->unique()
+            ->take(8)
+            ->values()
+            ->all();
+
+        if ($fields === []) {
+            return "I found {$label}. Tell me what to type into the fields, and I will fill them for you.";
+        }
+
+        return "I found {$label} with these fields: " . implode(', ', $fields) . '. Tell me the values to type, and I will fill them for you.';
+    }
+
+    private function shouldUseFormAgent(array $data): bool
+    {
+        $message = trim((string) ($data['message'] ?? ''));
+
+        if ($this->looksLikeFormAgentRequest($message)) {
+            return true;
+        }
+
+        return $this->looksLikeFieldValue($message)
+            && $this->recentAssistantAskedForFormValues($data['history'] ?? []);
+    }
+
+    private function looksLikeFormAgentRequest(string $message): bool
+    {
+        $text = mb_strtolower($message);
+        $hasFormTarget = (bool) preg_match('/\b(form|field|fields|application|signup|sign up|contact|checkout|registration|create account|email|password|name|organization|company|phone)\b/u', $text);
+
+        return ((bool) preg_match('/\b(fill|complete|populate|answer)\b/u', $text) && $hasFormTarget)
+            || ((bool) preg_match('/\b(type|enter|put|write|input|select|choose|check|uncheck)\b/u', $text) && $hasFormTarget)
+            || (bool) preg_match('/\b(submit|send)\s+(?:the\s+)?(?:form|application|registration|signup)\b/u', $text)
+            || (bool) preg_match('/\b(sign up|signup|register|create account)\b/u', $text);
+    }
+
+    private function looksLikeFieldValue(string $message): bool
+    {
+        $text = trim($message);
+        if ($text === '' || mb_strlen($text) > 500) {
+            return false;
+        }
+
+        return filter_var($text, FILTER_VALIDATE_EMAIL) !== false
+            || preg_match('/^\+?[0-9][0-9\s().-]{5,}$/', $text) === 1
+            || preg_match("/^[\\pL][\\pL\\pM'.-]+(?:\\s+[\\pL][\\pL\\pM'.-]+)+$/u", $text) === 1;
+    }
+
+    private function recentAssistantAskedForFormValues(array $history): bool
+    {
+        return collect($history)
+            ->take(-3)
+            ->contains(function ($turn) {
+                if (($turn['role'] ?? null) !== 'assistant') {
+                    return false;
+                }
+
+                $content = mb_strtolower(trim((string) ($turn['content'] ?? '')));
+
+                return $content !== ''
+                    && preg_match('/\b(found|fill|type|values?|field|fields?|form)\b/u', $content) === 1
+                    && preg_match('/\b(tell me|i need|provide|what should|values? to type|missing)\b/u', $content) === 1;
+            });
+    }
+
+    private function decodeJsonObject(string $raw): ?array
+    {
+        $text = trim($raw);
+        $text = preg_replace('/^```(?:json)?\s*/i', '', $text) ?? $text;
+        $text = preg_replace('/\s*```$/', '', $text) ?? $text;
+
+        $decoded = json_decode($text, true);
+        if (is_array($decoded)) {
+            return $decoded;
+        }
+
+        $start = strpos($text, '{');
+        $end = strrpos($text, '}');
+        if ($start === false || $end === false || $end <= $start) {
+            return null;
+        }
+
+        $decoded = json_decode(substr($text, $start, $end - $start + 1), true);
+
+        return is_array($decoded) ? $decoded : null;
+    }
+
+    /**
      * Build the system prompt by merging the bot prompt with page-aware and retrieval-aware instructions.
      */
     private function buildSystemPrompt(Chatbot $bot, string $pageContextText, string $knowledgeContext): string
@@ -549,6 +841,11 @@ class PublicChatController extends Controller
 
         $results = [];
 
+        foreach ($this->retrieveSemanticKnowledgeMatches($bot, $retrievalQuery ?: $message) as $row) {
+            $row->rank = 1000 + (float) ($row->similarity ?? 0);
+            $results[$row->id] = $row;
+        }
+
         foreach ($queries as $query) {
             $rows = DocumentChunk::query()
                 ->select([
@@ -569,7 +866,9 @@ class PublicChatController extends Controller
                 ->get();
 
             foreach ($rows as $row) {
-                $results[$row->id] = $row;
+                if (! isset($results[$row->id])) {
+                    $results[$row->id] = $row;
+                }
             }
         }
 
@@ -577,7 +876,9 @@ class PublicChatController extends Controller
             $fallbackRows = $this->fallbackKnowledgeMatches($bot, $message);
 
             foreach ($fallbackRows as $row) {
-                $results[$row->id] = $row;
+                if (! isset($results[$row->id])) {
+                    $results[$row->id] = $row;
+                }
             }
         }
 
@@ -586,6 +887,44 @@ class PublicChatController extends Controller
             ->take(8)
             ->values()
             ->all();
+    }
+
+    private function retrieveSemanticKnowledgeMatches(Chatbot $bot, string $query): array
+    {
+        $embedding = OllamaEmbeddings::embed($query);
+
+        if (! $embedding) {
+            return [];
+        }
+
+        $vector = OllamaEmbeddings::toPgVector($embedding);
+
+        try {
+            $rows = \DB::select("
+SELECT
+    document_chunks.id,
+    document_chunks.content,
+    document_chunks.chunk_index,
+    knowledge_sources.name AS source_name,
+    knowledge_sources.source_type AS source_type,
+    1 - (document_chunks.embedding <=> CAST(? AS vector)) AS similarity
+FROM document_chunks
+JOIN knowledge_sources ON knowledge_sources.id = document_chunks.source_id
+WHERE document_chunks.chatbot_id = ?
+  AND knowledge_sources.status = ?
+  AND document_chunks.embedding IS NOT NULL
+ORDER BY document_chunks.embedding <=> CAST(? AS vector)
+LIMIT 8
+", [$vector, $bot->id, "ready", $vector]);
+
+            $minSimilarity = (float) config("models.embeddings.min_similarity", 0.35);
+
+            return array_values(array_filter($rows, static fn ($row) => (float) ($row->similarity ?? 0) >= $minSimilarity));
+        } catch (\Throwable $e) {
+            report($e);
+
+            return [];
+        }
     }
 
     private function fallbackKnowledgeMatches(Chatbot $bot, string $message): array
@@ -751,7 +1090,7 @@ class PublicChatController extends Controller
   var EMBED_CACHE_MINUTES = parseCacheMinutes(explicitCacheMinutes);
 
   var closeTimer = null;
-  var state = { open: false, closing: false, conversationId: null, messages: [], sending: false, bot: null, pageContext: null, lastPageSignature: '', pageReadLabel: 'Scanning page...', draftMessage: '', draftEmail: '', activeField: null, headerCompact: false, panelAnimatedIn: false };
+  var state = { open: false, closing: false, conversationId: null, messages: [], sending: false, bot: null, pageContext: null, formContext: null, pendingFormSubmit: null, lastPageSignature: '', pageReadLabel: 'Scanning page...', draftMessage: '', draftEmail: '', activeField: null, headerCompact: false, headerProgress: 0, panelAnimatedIn: false };
   restoreSession();
 
   fetch(ORIGIN + '/api/public/bot/' + publicKey).then(function(r){return r.json();}).then(function(b){
@@ -783,32 +1122,26 @@ class PublicChatController extends Controller
     '.helix-panel[data-side="left"]{left:20px}',
     '.helix-panel.is-opening{animation:helixPanelIn .34s cubic-bezier(.22,1,.36,1) both}',
     '.helix-panel.is-closing{pointer-events:none;animation:helixPanelOut .24s cubic-bezier(.4,0,1,1) both}',
-    '.helix-panel.is-compact .helix-header{padding:8px 12px 5px;gap:4px}',
-    '.helix-panel.is-compact .helix-header-copy,.helix-panel.is-compact .helix-page-status{opacity:0;max-height:0;transform:translateY(-12px);pointer-events:none;margin:0;padding-top:0;padding-bottom:0;overflow:hidden}',
-    '.helix-panel.is-compact .helix-brand{align-items:center}',
-    '.helix-panel.is-compact .helix-brand-logo{width:40px;height:40px;border-radius:11px}',
-    '.helix-panel.is-compact .helix-brand-copy{padding-top:0}',
-    '.helix-panel.is-compact .helix-brand-label{margin-bottom:1px;font-size:12px}',
-    '.helix-panel.is-compact .helix-brand-name{font-size:20px}',
-    '.helix-header{position:relative;padding:10px 12px 12px;color:#fff;display:flex;flex-direction:column;gap:8px;overflow:hidden;transition:padding .22s ease,gap .22s ease}',
+    '.helix-panel.is-compact .helix-header-copy,.helix-panel.is-compact .helix-page-status{pointer-events:none}',
+    '.helix-header{position:relative;padding:var(--helix-header-padding,10px 12px 12px);color:#fff;display:flex;flex-direction:column;gap:var(--helix-header-gap,8px);overflow:hidden;transition:padding .08s linear,gap .08s linear}',
     '.helix-header::before{content:"";position:absolute;inset:-18% auto auto -16%;width:180px;height:180px;border-radius:999px;background:rgba(255,255,255,0.20);filter:blur(10px)}',
     '.helix-header::after{content:"";position:absolute;right:-56px;top:22px;width:180px;height:180px;border-radius:999px;background:rgba(255,255,255,0.14);filter:blur(24px)}',
     '.helix-header-top,.helix-header-copy,.helix-page-status,.helix-header-actions{position:relative;z-index:1}',
     '.helix-header-top{display:flex;align-items:center;justify-content:space-between;gap:8px}',
     '.helix-brand{display:flex;align-items:center;gap:8px;min-width:0;flex:1}',
-    '.helix-brand-logo{width:36px;height:36px;border-radius:12px;overflow:hidden;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,0.12);box-shadow:inset 0 0 0 1px rgba(255,255,255,0.12);flex-shrink:0}',
+    '.helix-brand-logo{width:var(--helix-logo-size,36px);height:var(--helix-logo-size,36px);border-radius:var(--helix-logo-radius,12px);overflow:hidden;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,0.12);box-shadow:inset 0 0 0 1px rgba(255,255,255,0.12);flex-shrink:0;transition:width .08s linear,height .08s linear,border-radius .08s linear}',
     '.helix-brand-logo img{width:100%;height:100%;object-fit:cover;display:block}',
     '.helix-brand-fallback{font-size:14px;font-weight:800;letter-spacing:.04em;text-transform:uppercase}',
     '.helix-brand-copy{min-width:0;padding-top:0;display:flex;flex-direction:column;justify-content:center}',
-    '.helix-brand-label{font-size:9px;letter-spacing:.09em;text-transform:uppercase;opacity:.72;margin-bottom:1px;line-height:1.1}',
-    '.helix-brand-name{font-size:16px;font-weight:700;line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px}',
+    '.helix-brand-label{font-size:var(--helix-brand-label-size,9px);letter-spacing:.09em;text-transform:uppercase;opacity:.72;margin-bottom:1px;line-height:1.1;transition:font-size .08s linear}',
+    '.helix-brand-name{font-size:var(--helix-brand-name-size,16px);font-weight:700;line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px;transition:font-size .08s linear}',
     '.helix-close{width:30px;height:30px;display:inline-flex;align-items:center;justify-content:center;background:rgba(255,255,255,0.12);border:none;color:#fff;cursor:pointer;font-size:22px;font-weight:400;line-height:1;padding:0 0 2px 0;border-radius:999px;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.14);backdrop-filter:blur(6px);flex-shrink:0;transition:background .18s ease,transform .18s ease}',
     '.helix-close:hover{background:rgba(255,255,255,0.18);transform:translateY(-1px)}',
-    '.helix-header-copy{display:flex;flex-direction:column;gap:6px;max-height:220px;opacity:1;transform:translateY(0);transform-origin:top left;transition:opacity .24s ease,transform .24s ease,max-height .28s ease}',
+    '.helix-header-copy{display:flex;flex-direction:column;gap:6px;max-height:var(--helix-header-copy-height,220px);opacity:var(--helix-header-copy-opacity,1);transform:translateY(var(--helix-header-copy-y,0));transform-origin:top left;overflow:hidden;transition:opacity .08s linear,transform .08s linear,max-height .08s linear}',
     '.helix-eyebrow{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;opacity:.78}',
     '.helix-headline{font-size:24px;line-height:1.02;font-weight:800;letter-spacing:-0.03em;max-width:240px}',
     '.helix-subcopy{font-size:13px;line-height:1.55;max-width:250px;color:rgba(255,255,255,0.86)}',
-    '.helix-page-status{display:inline-flex;align-items:center;gap:8px;align-self:flex-start;max-width:100%;padding:10px 14px;border-radius:16px;background:rgba(255,255,255,0.92);color:#334155;font-size:12px;font-weight:600;box-shadow:0 12px 24px rgba(15,23,42,0.12);max-height:56px;opacity:1;transform:translateY(0);transition:opacity .24s ease,transform .24s ease,max-height .28s ease,padding .24s ease,margin .24s ease}',
+    '.helix-page-status{display:inline-flex;align-items:center;gap:8px;align-self:flex-start;max-width:100%;padding:var(--helix-status-padding,10px 14px);border-radius:16px;background:rgba(255,255,255,0.92);color:#334155;font-size:12px;font-weight:600;box-shadow:0 12px 24px rgba(15,23,42,0.12);max-height:var(--helix-status-height,56px);opacity:var(--helix-status-opacity,1);transform:translateY(var(--helix-status-y,0));overflow:hidden;transition:opacity .08s linear,transform .08s linear,max-height .08s linear,padding .08s linear}',
     '.helix-page-status::before{content:"";width:8px;height:8px;border-radius:999px;background:currentColor;opacity:.65;flex-shrink:0}',
     '.helix-shell{flex:1;display:flex;flex-direction:column;min-height:0;background:linear-gradient(180deg,rgba(248,250,252,0.92) 0%,#ffffff 22%,#ffffff 100%)}',
     '.helix-body{flex:1;overflow-y:auto;padding:16px 16px 12px;background:transparent;display:flex;flex-direction:column;gap:10px}',
@@ -835,15 +1168,16 @@ class PublicChatController extends Controller
     '.helix-email{padding:12px 12px 0;background:transparent;border-top:none}',
     '.helix-email input{width:100%;border:1px solid #e2e8f0;border-radius:14px;padding:11px 13px;font-size:13px;outline:none;background:#fff;color:#0f172a;transition:border-color .2s ease,box-shadow .2s ease}',
     '.helix-email input:focus{border-color:#94a3b8;box-shadow:0 0 0 4px rgba(148,163,184,0.12)}',
-    '.helix-form{display:flex;gap:10px;padding:12px;background:transparent}',
-    '.helix-input{flex:1;border:1px solid #e2e8f0;border-radius:16px;padding:12px 14px;font-size:14px;outline:none;color:#0f172a;background:#fff;transition:border-color .2s ease,box-shadow .2s ease}',
+    '.helix-form{display:flex;align-items:flex-end;gap:10px;padding:12px;background:transparent}',
+    '.helix-input{flex:1;border:1px solid #e2e8f0;border-radius:16px;padding:12px 14px;font-size:14px;line-height:20px;min-height:46px;height:46px;max-height:76px;resize:none;overflow-y:auto;outline:none;color:#0f172a;background:#fff;transition:height .2s ease,border-color .2s ease,box-shadow .2s ease}',
+    '.helix-input.is-expanded{height:76px}',
     '.helix-input:focus{border-color:#94a3b8;box-shadow:0 0 0 4px rgba(148,163,184,0.12)}',
-    '.helix-send{border:none;color:#fff;border-radius:16px;padding:0 18px;cursor:pointer;font-weight:700;min-width:88px;box-shadow:0 14px 24px rgba(15,23,42,0.16);transition:transform .2s ease,box-shadow .2s ease}',
+    '.helix-send{border:none;color:#fff;border-radius:16px;padding:0 18px;cursor:pointer;font-weight:700;min-width:88px;height:46px;align-self:flex-end;box-shadow:0 14px 24px rgba(15,23,42,0.16);transition:transform .2s ease,box-shadow .2s ease}',
     '.helix-send:hover{transform:translateY(-1px);box-shadow:0 18px 28px rgba(15,23,42,0.18)}',
     '.helix-send:disabled{opacity:.5;cursor:not-allowed}',
     '.helix-foot{text-align:center;padding:0 0 14px;font-size:11px;color:#94a3b8;background:transparent;border-top:none}',
     '.helix-foot a{color:#64748b;text-decoration:none}',
-    ' (max-width:640px){.helix-panel{bottom:86px;width:min(390px,calc(100vw - 16px));max-width:calc(100vw - 16px);height:min(620px,calc(100vh - 100px));border-radius:24px}.helix-header{padding:9px 11px 11px}.helix-headline{font-size:22px;max-width:100%}.helix-brand-name{max-width:170px}.helix-composer{padding:0 10px 10px}.helix-body{padding:14px 12px 10px}.helix-page-status{max-width:100%}.helix-panel.is-compact .helix-header{padding:8px 10px 9px}}',
+    ' (max-width:640px){.helix-panel{bottom:86px;width:min(390px,calc(100vw - 16px));max-width:calc(100vw - 16px);height:min(620px,calc(100vh - 100px));border-radius:24px}.helix-header{padding:var(--helix-header-padding,9px 11px 11px)}.helix-headline{font-size:22px;max-width:100%}.helix-brand-name{max-width:170px}.helix-composer{padding:0 10px 10px}.helix-body{padding:14px 12px 10px}.helix-page-status{max-width:100%}}',
   ].join('');
   root.appendChild(style);
 
@@ -855,6 +1189,7 @@ class PublicChatController extends Controller
     if (state.open && !state.closing) return;
     state.closing = false;
     state.headerCompact = false;
+    state.headerProgress = 0;
     state.panelAnimatedIn = false;
     state.open = true;
     if (state.messages.length === 0) state.messages.push({ role: 'assistant', content: state.bot.welcome_message });
@@ -922,6 +1257,71 @@ class PublicChatController extends Controller
     }
   }
 
+  function pushUnique(out, seen, value, limit){
+    var clean = normalizeText(value, limit || 650);
+    if (!clean) return;
+    var key = clean.toLowerCase();
+    if (seen[key]) return;
+    seen[key] = true;
+    out.push(clean);
+  }
+
+  function summarizeFormFieldForReading(el){
+    var tag = String(el.tagName || '').toLowerCase();
+    var type = String(el.getAttribute('type') || el.type || tag).toLowerCase();
+    if (isSensitiveField(el)) return '';
+    var parts = [];
+    var label = labelForField(el) || normalizeText(el.getAttribute('placeholder') || el.name || '', 160);
+    parts.push('Field' + (label ? ': ' + label : ''));
+    parts.push('type: ' + type);
+    if (el.required) parts.push('required');
+    var placeholder = normalizeText(el.getAttribute('placeholder') || '', 160);
+    if (placeholder && placeholder !== label) parts.push('placeholder: ' + placeholder);
+    if (tag === 'select') {
+      var options = collectFieldOptions(el).map(function(option){ return option.label || option.value; }).filter(Boolean).slice(0, 12);
+      if (options.length) parts.push('options: ' + options.join(', '));
+    }
+    return parts.join(' | ');
+  }
+
+  function buildPageOutline(){
+    try {
+      var out = [];
+      var seen = {};
+      var selectors = [
+        'h1','h2','h3','h4','p','li','summary','blockquote',
+        'label','input','textarea','select','button','[role="button"]','a[href]'
+      ].join(',');
+      var nodes = document.body ? document.body.querySelectorAll(selectors) : [];
+      for (var i = 0; i < nodes.length && out.length < 120; i++) {
+        var el = nodes[i];
+        if (!el || (el.closest && el.closest('#helix-widget-root')) || !isVisibleElement(el)) continue;
+        var tag = String(el.tagName || '').toLowerCase();
+        var role = String(el.getAttribute('role') || '').toLowerCase();
+        var text = '';
+
+        if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+          text = summarizeFormFieldForReading(el);
+        } else if (tag === 'button' || role === 'button') {
+          text = 'Button: ' + normalizeText(el.innerText || el.textContent || el.getAttribute('aria-label') || '', 220);
+        } else if (tag === 'a') {
+          text = 'Link: ' + normalizeText(el.innerText || el.textContent || '', 220);
+        } else if (/^h[1-4]$/.test(tag)) {
+          text = tag.toUpperCase() + ': ' + normalizeText(el.innerText || el.textContent || '', 260);
+        } else if (tag === 'label') {
+          text = 'Label: ' + normalizeText(el.innerText || el.textContent || '', 220);
+        } else {
+          text = normalizeText(el.innerText || el.textContent || '', 420);
+        }
+
+        pushUnique(out, seen, text, 650);
+      }
+      return out;
+    } catch (e) {
+      return [];
+    }
+  }
+
   function buildSections(){
     var sections = [];
     function pushSection(name, content){
@@ -969,6 +1369,215 @@ class PublicChatController extends Controller
     }catch(e){ return []; }
   }
 
+  function cssEscapeValue(value){
+    if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(String(value));
+    return String(value).replace(/[^a-zA-Z0-9_-]/g, function(ch){ return '\\\\' + ch; });
+  }
+
+  function isVisibleElement(el){
+    if (!el || (el.closest && el.closest('#helix-widget-root'))) return false;
+    var style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+    if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) return false;
+    var rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+    return !rect || (rect.width > 0 && rect.height > 0);
+  }
+
+  function ensureAgentId(el, prefix){
+    var attr = 'data-helix-agent-id';
+    var id = el.getAttribute(attr);
+    if (!id) {
+      id = prefix + '_' + Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-4);
+      el.setAttribute(attr, id);
+    }
+    return id;
+  }
+
+  function agentSelector(id){
+    return '[data-helix-agent-id="' + cssEscapeValue(id) + '"]';
+  }
+
+  function textFromLabelElement(el){
+    return normalizeText((el && (el.innerText || el.textContent)) || '', 180);
+  }
+
+  function labelForField(el){
+    var aria = normalizeText(el.getAttribute('aria-label') || '', 180);
+    if (aria) return aria;
+    var labelledBy = el.getAttribute('aria-labelledby');
+    if (labelledBy) {
+      var parts = labelledBy.split(/\s+/).map(function(id){ return textFromLabelElement(document.getElementById(id)); }).filter(Boolean);
+      if (parts.length) return normalizeText(parts.join(' '), 180);
+    }
+    if (el.id) {
+      var label = document.querySelector('label[for="' + cssEscapeValue(el.id) + '"]');
+      var labelText = textFromLabelElement(label);
+      if (labelText) return labelText;
+    }
+    var wrappingLabel = el.closest ? el.closest('label') : null;
+    var wrappingText = textFromLabelElement(wrappingLabel);
+    if (wrappingText) return wrappingText;
+    var parent = el.parentElement;
+    if (parent) {
+      var nearby = parent.querySelector('label');
+      var nearbyText = textFromLabelElement(nearby);
+      if (nearbyText) return nearbyText;
+    }
+    return normalizeText(el.getAttribute('name') || el.getAttribute('placeholder') || '', 180);
+  }
+
+  function isSearchField(el){
+    var type = String(el.getAttribute('type') || el.type || '').toLowerCase();
+    var nameId = [el.name, el.id].join(' ').toLowerCase();
+    var joined = [type, nameId, el.getAttribute('role'), el.getAttribute('aria-label'), el.getAttribute('placeholder'), labelForField(el)].join(' ').toLowerCase();
+    return type === 'search'
+      || /\b(search|query|filter)\b/i.test(joined)
+      || (/^(?:q|query|search)$/i.test(String(el.name || '').trim()) && /\b(search|query|filter)\b/i.test(joined))
+      || (/^(?:q|query|search)$/i.test(String(el.id || '').trim()) && /\b(search|query|filter)\b/i.test(joined));
+  }
+
+  function isSensitiveField(el){
+    var type = String(el.getAttribute('type') || el.type || '').toLowerCase();
+    var joined = [type, el.name, el.id, el.getAttribute('autocomplete'), el.getAttribute('placeholder'), labelForField(el)].join(' ').toLowerCase();
+    if ((type === 'button' || type === 'submit') && isCustomChoiceControl(el)) return false;
+    if (['hidden', 'file', 'image', 'reset', 'button', 'submit'].indexOf(type) !== -1) return true;
+    return /(credit|card|cc-|cvv|cvc|otp|one[-\s]?time|token|captcha|secret|ssn|social security|government id|passport|bank|routing)/i.test(joined);
+  }
+
+  function collectFieldOptions(el){
+    var options = [];
+    var seen = {};
+    function pushOption(value, label){
+      var cleanValue = normalizeText(value, 300);
+      var cleanLabel = normalizeText(label, 300);
+      var key = (cleanValue || cleanLabel).toLowerCase();
+      if (!key || seen[key]) return;
+      seen[key] = true;
+      options.push({ value: cleanValue || cleanLabel, label: cleanLabel || cleanValue });
+    }
+
+    if (el.tagName && el.tagName.toLowerCase() === 'select') {
+      for (var i = 0; i < el.options.length; i++) {
+        pushOption(el.options[i].value, el.options[i].text);
+      }
+    }
+
+    var owns = el.getAttribute && (el.getAttribute('aria-controls') || el.getAttribute('aria-owns'));
+    if (owns) {
+      owns.split(/\s+/).forEach(function(id){
+        var list = document.getElementById(id);
+        if (!list) return;
+        var nodes = list.querySelectorAll('[role="option"],[role="menuitem"],li,button,[data-value]');
+        for (var i = 0; i < nodes.length && options.length < 40; i++) {
+          var option = nodes[i];
+          if (!isVisibleElement(option)) continue;
+          pushOption(option.getAttribute('data-value') || option.getAttribute('value') || option.textContent, option.innerText || option.textContent);
+        }
+      });
+    }
+
+    return options.slice(0, 40);
+  }
+
+  function isCustomChoiceControl(el){
+    var role = String(el.getAttribute('role') || '').toLowerCase();
+    var popup = String(el.getAttribute('aria-haspopup') || '').toLowerCase();
+    return role === 'combobox' || role === 'listbox' || popup === 'listbox' || popup === 'menu' || popup === 'true';
+  }
+
+  function fieldCurrentValue(el, tag, type){
+    if (type === 'checkbox' || type === 'radio') return normalizeText(el.value || '', 300);
+    if (tag === 'select' || 'value' in el) return normalizeText(el.value || '', 500);
+    if (el.isContentEditable) return normalizeText(el.innerText || el.textContent || '', 500);
+    return normalizeText(el.getAttribute('aria-valuetext') || el.getAttribute('data-value') || el.innerText || el.textContent || '', 500);
+  }
+
+  function serializeFormField(el){
+    if (!isVisibleElement(el) || isSensitiveField(el) || isSearchField(el)) return null;
+    var tag = String(el.tagName || '').toLowerCase();
+    var role = String(el.getAttribute('role') || '').toLowerCase();
+    var type = String(el.getAttribute('type') || el.type || (isCustomChoiceControl(el) ? 'select' : tag)).toLowerCase();
+    var editable = !!el.isContentEditable;
+    if ((type === 'button' || type === 'submit') && !isCustomChoiceControl(el) && !editable) return null;
+    var fieldId = ensureAgentId(el, 'field');
+    return {
+      id: fieldId,
+      selector: agentSelector(fieldId),
+      tag: tag,
+      type: type,
+      role: role,
+      name: normalizeText(el.getAttribute('name') || '', 200),
+      label: labelForField(el),
+      ariaLabel: normalizeText(el.getAttribute('aria-label') || '', 200),
+      placeholder: normalizeText(el.getAttribute('placeholder') || '', 200),
+      required: !!(el.required || el.getAttribute('aria-required') === 'true'),
+      disabled: !!(el.disabled || el.getAttribute('aria-disabled') === 'true'),
+      readOnly: !!(el.readOnly || el.getAttribute('aria-readonly') === 'true'),
+      contentEditable: editable,
+      value: fieldCurrentValue(el, tag, type),
+      checked: !!(el.checked || el.getAttribute('aria-checked') === 'true'),
+      options: collectFieldOptions(el)
+    };
+  }
+
+  function buildFormRecord(container, controls, fallbackLabel){
+    if (!container || !isVisibleElement(container)) return null;
+    var fields = [];
+    for (var i = 0; i < controls.length && fields.length < 40; i++) {
+      var field = serializeFormField(controls[i]);
+      if (field) fields.push(field);
+    }
+    if (!fields.length) return null;
+
+    var formId = ensureAgentId(container, 'form');
+    var submit = container.querySelector ? container.querySelector('button[type="submit"],input[type="submit"],button:not([type])') : null;
+    var submitSelector = null;
+    if (submit && isVisibleElement(submit)) {
+      submitSelector = agentSelector(ensureAgentId(submit, 'submit'));
+    }
+
+    return {
+      id: formId,
+      selector: agentSelector(formId),
+      label: normalizeText(container.getAttribute('aria-label') || container.getAttribute('name') || textFromLabelElement(container.querySelector && container.querySelector('legend,h1,h2,h3')) || fallbackLabel || document.title || 'Form', 300),
+      submitSelector: submitSelector,
+      fields: fields
+    };
+  }
+
+  function collectFormContext(){
+    try {
+      var forms = [];
+      var used = [];
+      var formNodes = Array.prototype.slice.call(document.querySelectorAll('form'));
+      for (var i = 0; i < formNodes.length && forms.length < 5; i++) {
+        var form = formNodes[i];
+        var controls = Array.prototype.slice.call(form.querySelectorAll('input,textarea,select,[contenteditable="true"],[role="textbox"],[role="combobox"],[role="listbox"],button[aria-haspopup]'));
+        var record = buildFormRecord(form, controls, 'Form');
+        if (!record) continue;
+        forms.push(record);
+        for (var u = 0; u < controls.length; u++) used.push(controls[u]);
+      }
+
+      if (forms.length < 5) {
+        var looseControls = Array.prototype.slice.call(document.querySelectorAll('input,textarea,select,[contenteditable="true"],[role="textbox"],[role="combobox"],[role="listbox"],button[aria-haspopup]'))
+          .filter(function(el){ return used.indexOf(el) === -1 && !(el.closest && el.closest('#helix-widget-root')); });
+        if (looseControls.length) {
+          var container = null;
+          for (var c = 0; c < looseControls.length; c++) {
+            var candidate = looseControls[c].closest && looseControls[c].closest('main,section,article,[role="main"],[class*="form"],[class*="signup"],[class*="login"],[class*="auth"],body');
+            if (candidate && isVisibleElement(candidate)) { container = candidate; break; }
+          }
+          var record = buildFormRecord(container || document.body, looseControls, 'Visible fields');
+          if (record) forms.push(record);
+        }
+      }
+
+      return { forms: forms.slice(0, 5), scannedAt: new Date().toISOString() };
+    } catch (e) {
+      return { forms: [], scannedAt: new Date().toISOString() };
+    }
+  }
+
   function getPageContext(){
     try{
       var pageName = normalizeText((document.querySelector('h1') || {}).innerText || document.title || '', 180);
@@ -980,10 +1589,11 @@ class PublicChatController extends Controller
         pageUrl: window.location.href,
         pageLinks: collectPageLinks(),
         pageSections: pageSections,
+        pageOutline: buildPageOutline(),
         pageContent: bodyText,
         scrapedAt: new Date().toISOString()
       };
-    }catch(e){ return { pageTitle:'', pageName:'', pageUrl:window.location.href, pageLinks:[], pageContent:'', pageSections:[], scrapedAt:new Date().toISOString() }; }
+    }catch(e){ return { pageTitle:'', pageName:'', pageUrl:window.location.href, pageLinks:[], pageContent:'', pageSections:[], pageOutline:[], scrapedAt:new Date().toISOString() }; }
   }
 
   function buildPageSignature(ctx){
@@ -992,6 +1602,7 @@ class PublicChatController extends Controller
       ctx.pageTitle || '',
       ctx.pageName || '',
       ((ctx.pageLinks || []).map(function(link){ return [link.label || '', link.url || ''].join('='); }).join('|')).substring(0, 600),
+      ((ctx.pageOutline || []).join('|')).substring(0, 2200),
       (ctx.pageContent || '').substring(0, 1600)
     ]);
   }
@@ -1217,11 +1828,41 @@ class PublicChatController extends Controller
     };
   }
 
-  function updateCompactHeader(panel, scrolled){
+  function px(value){
+    return (Math.round(value * 100) / 100) + 'px';
+  }
+
+  function setPanelVar(panel, name, value){
+    panel.style.setProperty(name, value);
+  }
+
+  function updateCompactHeader(panel, scrollTop){
     if (!panel) return;
-    state.headerCompact = !!scrolled;
+    var body = panel.querySelector('#helix-body');
+    var maxScroll = body ? Math.max(0, body.scrollHeight - body.clientHeight) : 0;
+    var collapseDistance = Math.max(72, Math.min(120, maxScroll || 120));
+    var progress = maxScroll <= 2 ? 0 : clamp(Number(scrollTop || 0) / collapseDistance, 0, 1);
+    if (progress < 0.02) progress = 0;
+    if (progress > 0.98) progress = 1;
+
+    state.headerProgress = progress;
+    state.headerCompact = progress === 1;
     if (state.headerCompact) panel.classList.add('is-compact');
     else panel.classList.remove('is-compact');
+
+    setPanelVar(panel, '--helix-header-padding', px(10 - (2 * progress)) + ' 12px ' + px(12 - (7 * progress)));
+    setPanelVar(panel, '--helix-header-gap', px(8 - (4 * progress)));
+    setPanelVar(panel, '--helix-logo-size', px(36 + (4 * progress)));
+    setPanelVar(panel, '--helix-logo-radius', px(12 - progress));
+    setPanelVar(panel, '--helix-brand-label-size', px(9 + (3 * progress)));
+    setPanelVar(panel, '--helix-brand-name-size', px(16 + (4 * progress)));
+    setPanelVar(panel, '--helix-header-copy-opacity', String(clamp(1 - (progress * 1.15), 0, 1)));
+    setPanelVar(panel, '--helix-header-copy-height', px(220 * (1 - progress)));
+    setPanelVar(panel, '--helix-header-copy-y', px(-12 * progress));
+    setPanelVar(panel, '--helix-status-opacity', String(clamp(1 - (progress * 1.2), 0, 1)));
+    setPanelVar(panel, '--helix-status-height', px(56 * (1 - progress)));
+    setPanelVar(panel, '--helix-status-padding', px(10 * (1 - progress)) + ' 14px');
+    setPanelVar(panel, '--helix-status-y', px(-12 * progress));
   }
 
   function syncComposerState(panel){
@@ -1235,30 +1876,220 @@ class PublicChatController extends Controller
     if (sendBtn) sendBtn.disabled = !canSendMessage(message, email);
   }
 
+  function setNativeValue(el, value){
+    var proto = HTMLInputElement.prototype;
+    if (el instanceof HTMLTextAreaElement) proto = HTMLTextAreaElement.prototype;
+    else if (el instanceof HTMLSelectElement) proto = HTMLSelectElement.prototype;
+    var descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (descriptor && descriptor.set) descriptor.set.call(el, value);
+    else el.value = value;
+  }
+
+  function dispatchFieldEvents(el){
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    el.dispatchEvent(new Event('blur', { bubbles: true }));
+  }
+
+  function normalizeComparable(value){
+    return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  function findMatchingRadio(el, desired){
+    var form = el.form || (el.closest ? el.closest('form') : null);
+    var name = el.name;
+    var radios = name && form ? form.querySelectorAll('input[type="radio"][name="' + cssEscapeValue(name) + '"]') : [el];
+    var target = normalizeComparable(desired);
+    for (var i = 0; i < radios.length; i++) {
+      var radio = radios[i];
+      var label = labelForField(radio);
+      if (normalizeComparable(radio.value) === target || normalizeComparable(label) === target) return radio;
+    }
+    return el;
+  }
+
+  function chooseOpenOption(value){
+    var wanted = normalizeComparable(value);
+    if (!wanted) return false;
+    var nodes = document.querySelectorAll('[role="option"],[role="menuitem"],[cmdk-item],li,button,[data-value]');
+    for (var i = 0; i < nodes.length; i++) {
+      var option = nodes[i];
+      if (!option || (option.closest && option.closest('#helix-widget-root')) || !isVisibleElement(option)) continue;
+      var label = normalizeComparable(option.innerText || option.textContent || option.getAttribute('aria-label') || '');
+      var optionValue = normalizeComparable(option.getAttribute('data-value') || option.getAttribute('value') || '');
+      if (label === wanted || optionValue === wanted || (label && label.indexOf(wanted) !== -1)) {
+        option.click();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function fillCustomChoiceControl(el, value){
+    el.focus && el.focus();
+    el.click && el.click();
+    window.setTimeout(function(){ chooseOpenOption(value); dispatchFieldEvents(el); }, 80);
+    return true;
+  }
+
+  function fillContentEditable(el, value){
+    el.focus && el.focus();
+    el.textContent = value;
+    dispatchFieldEvents(el);
+    return true;
+  }
+
+  function fillOneField(field){
+    if (!field || !field.selector) return false;
+    var el = document.querySelector(field.selector);
+    if (!el || !isVisibleElement(el) || el.disabled || el.readOnly || el.getAttribute('aria-disabled') === 'true' || el.getAttribute('aria-readonly') === 'true' || isSensitiveField(el)) return false;
+    var tag = String(el.tagName || '').toLowerCase();
+    var role = String(el.getAttribute('role') || '').toLowerCase();
+    var type = String(el.getAttribute('type') || el.type || (isCustomChoiceControl(el) ? 'select' : tag)).toLowerCase();
+    var value = field.value == null ? '' : String(field.value);
+
+    if (el.isContentEditable || role === 'textbox') {
+      return fillContentEditable(el, value);
+    }
+
+    if (isCustomChoiceControl(el) && tag !== 'select') {
+      return fillCustomChoiceControl(el, value);
+    }
+
+    if (type === 'checkbox') {
+      el.checked = field.checked === null || typeof field.checked === 'undefined' ? ['true', 'yes', 'on', '1'].indexOf(normalizeComparable(value)) !== -1 : !!field.checked;
+      dispatchFieldEvents(el);
+      return true;
+    }
+
+    if (type === 'radio') {
+      var radio = findMatchingRadio(el, value || el.value);
+      radio.checked = true;
+      dispatchFieldEvents(radio);
+      return true;
+    }
+
+    if (tag === 'select') {
+      var wanted = normalizeComparable(value);
+      var matched = false;
+      for (var i = 0; i < el.options.length; i++) {
+        var option = el.options[i];
+        if (normalizeComparable(option.value) === wanted || normalizeComparable(option.text) === wanted) {
+          el.selectedIndex = i;
+          setNativeValue(el, option.value);
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) setNativeValue(el, value);
+      dispatchFieldEvents(el);
+      return true;
+    }
+
+    setNativeValue(el, value);
+    dispatchFieldEvents(el);
+    return true;
+  }
+
+  function applyAgentAction(action){
+    if (!action || action.type !== 'fill_form') return null;
+    var filled = 0;
+    var fields = Array.isArray(action.fields) ? action.fields : [];
+    for (var i = 0; i < fields.length; i++) {
+      if (fillOneField(fields[i])) filled++;
+    }
+
+    var missing = Array.isArray(action.missing) ? action.missing.filter(Boolean) : [];
+    if (action.submit) {
+      state.pendingFormSubmit = {
+        formSelector: action.formSelector || null,
+        submitSelector: action.submitSelector || null
+      };
+    }
+
+    if (missing.length) {
+      return { message: 'I filled ' + filled + ' field' + (filled === 1 ? '' : 's') + '. I still need: ' + missing.join(', ') + '.' };
+    }
+    if (filled > 0 && action.submit) {
+      return { message: 'I filled ' + filled + ' field' + (filled === 1 ? '' : 's') + '. Review the form, then tell me "submit" if you want me to submit it.' };
+    }
+    if (filled > 0) {
+      return { message: 'I filled ' + filled + ' field' + (filled === 1 ? '' : 's') + '. Review the form before submitting.' };
+    }
+    return { message: 'I found the form, but I could not safely fill any fields.' };
+  }
+
+  function submitPendingForm(){
+    var pending = state.pendingFormSubmit || {};
+    var button = pending.submitSelector ? document.querySelector(pending.submitSelector) : null;
+    var form = pending.formSelector ? document.querySelector(pending.formSelector) : null;
+    if (!form && button && button.form) form = button.form;
+    if (button && isVisibleElement(button) && !button.disabled) {
+      button.click();
+      return true;
+    }
+    if (form && typeof form.requestSubmit === 'function') {
+      form.requestSubmit();
+      return true;
+    }
+    return false;
+  }
+
+  function handlePendingFormConfirmation(msg){
+    if (!state.pendingFormSubmit) return false;
+    var text = normalizeComparable(msg);
+    var confirms = /^(yes|y|submit|send|go ahead|confirm|do it|okay|ok|proceed)(\b|$)/.test(text);
+    var cancels = /^(no|n|cancel|stop|never mind|nevermind)(\b|$)/.test(text);
+    if (!confirms && !cancels) return false;
+
+    state.messages.push({ role: 'user', content: msg });
+    state.draftMessage = '';
+    if (confirms) {
+      var submitted = submitPendingForm();
+      state.messages.push({ role: 'assistant', content: submitted ? 'Submitted the form.' : 'I could not submit the form from here. Please use the page submit button.' });
+    } else {
+      state.messages.push({ role: 'assistant', content: 'I will not submit it. You can still edit the form manually.' });
+    }
+    state.pendingFormSubmit = null;
+    persistSession();
+    render();
+    return true;
+  }
+
+  function compactHistoryMessage(message){
+    var role = message && message.role === 'assistant' ? 'assistant' : 'user';
+    var content = normalizeText((message && message.content) || '', 3500);
+    return content ? { role: role, content: content } : null;
+  }
+
   function send(msg){
     var visitorEmail = getDraftOrStoredEmail();
     if (!canSendMessage(msg, visitorEmail)) return;
+    if (handlePendingFormConfirmation(msg)) return;
     state.sending = true;
     state.messages.push({ role: 'user', content: msg });
     state.draftMessage = '';
     persistSession();
     render();
-    var history = state.messages.slice(-10).map(function(m){return {role:m.role,content:m.content};});
+    var history = state.messages.slice(-9, -1).map(compactHistoryMessage).filter(Boolean);
     if (!state.pageContext) refreshPageContext(true);
     var pageCtx = state.pageContext || getPageContext();
+    var formCtx = collectFormContext();
+    state.formContext = formCtx;
     fetch(ORIGIN + '/api/public/chat', {
       method: 'POST',
       headers: {
         'Content-Type': 'text/plain;charset=UTF-8',
         'Accept': 'application/json'
       },
-      body: JSON.stringify({ publicKey: publicKey, message: msg, conversationId: state.conversationId, visitorId: visitorId, visitorEmail: visitorEmail, history: history.slice(0, -1), pageContext: pageCtx })
+      body: JSON.stringify({ publicKey: publicKey, message: msg, conversationId: state.conversationId, visitorId: visitorId, visitorEmail: visitorEmail, history: history, pageContext: pageCtx, formContext: formCtx })
     }).then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j};});}).then(function(res){
       state.sending = false;
       if (!res.ok) { state.messages.push({ role:'assistant', content: res.j.error || res.j.message || 'Sorry, something went wrong.' }); }
       else {
         state.conversationId = res.j.conversationId;
-        state.messages.push({ role:'assistant', content: res.j.reply });
+        var actionResult = res.j.agentAction ? applyAgentAction(res.j.agentAction) : null;
+        state.messages.push({ role:'assistant', content: actionResult && actionResult.message ? actionResult.message : res.j.reply });
       }
       persistSession();
       render();
@@ -1323,7 +2154,7 @@ class PublicChatController extends Controller
         '<div class="helix-body" id="helix-body"></div>' +
         '<div class="helix-composer"><div class="helix-composer-card">' +
           emailSection +
-          '<form class="helix-form" id="helix-form"><input class="helix-input" id="helix-input" placeholder="Ask anything..." autocomplete="off"/><button class="helix-send" id="helix-send" type="submit" style="background:' + theme.userGradient + ';color:' + theme.primaryText + '">Send</button></form>' +
+          '<form class="helix-form" id="helix-form"><textarea class="helix-input" id="helix-input" placeholder="Ask anything..." autocomplete="off" rows="1"></textarea><button class="helix-send" id="helix-send" type="submit" style="background:' + theme.userGradient + ';color:' + theme.primaryText + '">Send</button></form>' +
         '</div></div>' +
         '<div class="helix-foot">Powered by <a href="' + ORIGIN + '">Helix</a></div>' +
       '</div>';
@@ -1350,15 +2181,38 @@ class PublicChatController extends Controller
       body.appendChild(t);
     }
     body.scrollTop = body.scrollHeight;
+    var headerScrollFrame = null;
+    function syncHeaderCollapse(){
+      headerScrollFrame = null;
+      updateCompactHeader(panel, body.scrollTop);
+    }
     body.onscroll = function(){
-      updateCompactHeader(panel, body.scrollTop > 24);
+      if (headerScrollFrame) return;
+      headerScrollFrame = window.requestAnimationFrame
+        ? window.requestAnimationFrame(syncHeaderCollapse)
+        : setTimeout(syncHeaderCollapse, 16);
     };
+    updateCompactHeader(panel, body.scrollTop);
 
     panel.querySelector('.helix-close').onclick = function(){ closeWidget(); };
     var emailInput = panel.querySelector('#helix-email');
     var messageInput = panel.querySelector('#helix-input');
+    function syncMessageInputHeight(){
+      if (!messageInput) return;
+      if ((messageInput.value || '').indexOf('\n') !== -1) messageInput.classList.add('is-expanded');
+      else messageInput.classList.remove('is-expanded');
+    }
     messageInput.value = state.draftMessage || '';
-    messageInput.oninput = function(){ state.draftMessage = messageInput.value; persistSession(); };
+    syncMessageInputHeight();
+    messageInput.onkeydown = function(e){
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        var form = panel.querySelector('#helix-form');
+        if (form.requestSubmit) form.requestSubmit();
+        else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+      }
+    };
+    messageInput.oninput = function(){ state.draftMessage = messageInput.value; syncMessageInputHeight(); persistSession(); };
     messageInput.onfocus = function(){ state.activeField = 'message'; };
     messageInput.onblur = function(){ if (state.activeField === 'message') state.activeField = null; };
     if (emailInput) {
@@ -1379,11 +2233,12 @@ class PublicChatController extends Controller
       }
       if (collectEmail) persistVisitorEmail(email);
       messageInput.value = '';
+      syncMessageInputHeight();
       syncComposerState(panel);
       send(v);
       return false;
     };
-    messageInput.oninput = function(){ state.draftMessage = messageInput.value; persistSession(); syncComposerState(panel); };
+    messageInput.oninput = function(){ state.draftMessage = messageInput.value; syncMessageInputHeight(); persistSession(); syncComposerState(panel); };
     persistSession();
     syncComposerState(panel);
   }
@@ -1628,6 +2483,15 @@ JS;
                 $content = $section['content'] ?? '';
                 if ($content !== '') {
                     $lines[] = '- ' . $name . ': ' . $content;
+                }
+            }
+        }
+        if (! empty($pageContext['pageOutline']) && is_array($pageContext['pageOutline'])) {
+            $lines[] = 'Top-to-Bottom Page Reading Order:';
+            foreach (array_slice($pageContext['pageOutline'], 0, 100) as $item) {
+                $text = trim((string) $item);
+                if ($text !== '') {
+                    $lines[] = '- ' . $text;
                 }
             }
         }
