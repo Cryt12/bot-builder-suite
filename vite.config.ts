@@ -27,6 +27,10 @@ export default defineConfig(({ command, mode }) => {
           target: laravelOrigin,
           changeOrigin: true,
         },
+        "/storage": {
+          target: laravelOrigin,
+          changeOrigin: true,
+        },
       },
     },
   };
