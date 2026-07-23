@@ -13,6 +13,7 @@ use App\Support\OllamaEmbeddings;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Storage;
@@ -20,6 +21,24 @@ use Illuminate\Support\Str;
 
 class PublicChatController extends Controller
 {
+    /** How many suggested questions the widget shows on its empty state. */
+    private const FAQ_LIMIT = 5;
+
+    private const FAQ_CACHE_MINUTES = 10;
+
+    private const FAQ_WINDOW_DAYS = 180;
+
+    private const FAQ_MESSAGE_SCAN_LIMIT = 3000;
+
+    private const FAQ_CHUNK_SCAN_LIMIT = 200;
+
+    /** Distinct visitors that must have asked something before it is shown to others. */
+    private const FAQ_MIN_VISITORS = 2;
+
+    private const FAQ_MIN_LENGTH = 8;
+
+    private const FAQ_MAX_LENGTH = 90;
+
     /**
      * Serve the embeddable widget bundle consumed by third-party sites.
      */
@@ -205,6 +224,7 @@ class PublicChatController extends Controller
             'welcome_message' => $bot->welcome_message,
             'primary_color' => $bot->primary_color,
             'logo_url' => $this->resolveLogoUrl($apiKey, $bot->logo_path),
+            'logo_scale' => Chatbot::supportsLogoScale() ? max(50, min(200, (int) ($bot->logo_scale ?? 100))) : 100,
             'bubble_position' => $bot->bubble_position,
             'collect_email' => $bot->collect_email,
             'widget_cache_minutes' => Chatbot::supportsWidgetCacheMinutes()
@@ -212,7 +232,393 @@ class PublicChatController extends Controller
                 : 10,
             'public_key' => $bot->public_key,
             'is_active' => $bot->is_active,
+            'faqs' => $this->frequentlyAskedQuestions($bot),
+            'cta' => $this->ctaLink($bot),
+            'footer' => $this->footerBranding($bot),
         ]);
+    }
+
+    /**
+     * Custom footer text and co-brand logos. Null means the widget keeps its default credit.
+     */
+    private function footerBranding(Chatbot $bot): ?array
+    {
+        if (! Chatbot::supportsFooterBranding()) {
+            return null;
+        }
+
+        $text = trim((string) $bot->footer_text);
+        $logos = is_array($bot->footer_logos) ? $bot->footer_logos : [];
+        $origin = rtrim((string) config('app.url', ''), '/');
+        $publicKey = trim((string) $bot->public_key);
+
+        $urls = collect($logos)
+            ->filter(fn ($logo) => is_array($logo) && trim((string) ($logo['path'] ?? '')) !== '')
+            ->take(3)
+            ->values()
+            ->map(fn (array $logo, int $position) => [
+                'url' => $origin . '/api/public/footer-logo/' . $publicKey . '/' . $position,
+                'scale' => max(50, min(200, (int) ($logo['scale'] ?? 100) ?: 100)),
+            ])
+            ->all();
+
+        if ($text === '' && $urls === []) {
+            return null;
+        }
+
+        return [
+            'text' => $text !== '' ? Str::limit($text, 80, '') : '',
+            'logos' => $urls,
+        ];
+    }
+
+    /**
+     * The widget's call-to-action link, re-checked here so only http(s) ever reaches a page.
+     */
+    private function ctaLink(Chatbot $bot): ?array
+    {
+        if (! Chatbot::supportsCtaLink()) {
+            return null;
+        }
+
+        $url = trim((string) $bot->cta_url);
+        $label = trim((string) $bot->cta_label);
+
+        if ($url === '' || ! preg_match('#^https?://#i', $url)) {
+            return null;
+        }
+
+        return [
+            'label' => $label !== '' ? Str::limit($label, 40, '') : 'Visit website',
+            'url' => $url,
+        ];
+    }
+
+    /**
+     * Suggested questions for the widget's empty state, mined from what visitors actually ask.
+     * Falls back to question-shaped lines in the knowledge base while a bot has little history.
+     */
+    private function frequentlyAskedQuestions(Chatbot $bot, int $limit = self::FAQ_LIMIT): array
+    {
+        try {
+            return Cache::remember(
+                'helix_bot_faqs_' . $bot->id . '_' . $limit,
+                now()->addMinutes(self::FAQ_CACHE_MINUTES),
+                function () use ($bot, $limit) {
+                    $questions = $this->askedQuestionSuggestions($bot, $limit);
+
+                    if (count($questions) < $limit) {
+                        foreach ($this->knowledgeQuestionSuggestions($bot, $limit) as $question) {
+                            if (count($questions) >= $limit) {
+                                break;
+                            }
+
+                            if (! $this->isDuplicateQuestion($question, $questions)) {
+                                $questions[] = $question;
+                            }
+                        }
+                    }
+
+                    return array_values($questions);
+                },
+            );
+        } catch (\Throwable $e) {
+            report($e);
+
+            return [];
+        }
+    }
+
+    /**
+     * Cluster past visitor messages by their significant terms and return the most-asked phrasings.
+     * A cluster is only surfaced once separate visitors have asked it, so a one-off message
+     * (which may contain personal details) is never echoed back to other visitors.
+     */
+    private function askedQuestionSuggestions(Chatbot $bot, int $limit): array
+    {
+        $rows = Message::query()
+            ->join('conversations', 'conversations.id', '=', 'messages.conversation_id')
+            ->where('conversations.chatbot_id', $bot->id)
+            ->whereIn('messages.role', ['user', 'assistant'])
+            ->where('messages.created_at', '>=', now()->subDays(self::FAQ_WINDOW_DAYS))
+            ->orderBy('messages.conversation_id')
+            ->orderBy('messages.created_at')
+            ->orderBy('messages.id')
+            ->limit(self::FAQ_MESSAGE_SCAN_LIMIT)
+            ->get([
+                'messages.role',
+                'messages.content',
+                'messages.created_at',
+                'messages.conversation_id',
+                'conversations.visitor_id as visitor_id',
+            ]);
+
+        $clusters = [];
+        $pending = null;
+
+        foreach ($rows as $row) {
+            if ($row->role === 'assistant') {
+                // The reply that followed the question decides whether it is worth suggesting.
+                if ($pending !== null && $pending['conversation_id'] === $row->conversation_id) {
+                    if ($this->looksAnswered((string) $row->content)) {
+                        $clusters[$pending['key']]['answered']++;
+                    }
+
+                    $pending = null;
+                }
+
+                continue;
+            }
+
+            $pending = null;
+            $text = $this->normalizeQuestionText((string) $row->content);
+
+            if (! $this->isSuggestableQuestion($text)) {
+                continue;
+            }
+
+            if (count($this->extractKnowledgeTerms($text)) < 2) {
+                continue;
+            }
+
+            $key = $this->questionSignature($text);
+            $visitor = (string) ($row->visitor_id ?: $row->conversation_id);
+
+            if (! isset($clusters[$key])) {
+                $clusters[$key] = [
+                    'asks' => 0,
+                    'answered' => 0,
+                    'visitors' => [],
+                    'variants' => [],
+                    'last_asked' => 0,
+                ];
+            }
+
+            $clusters[$key]['asks']++;
+            $clusters[$key]['visitors'][$visitor] = true;
+            $clusters[$key]['variants'][$text] = ($clusters[$key]['variants'][$text] ?? 0) + 1;
+            $clusters[$key]['last_asked'] = max(
+                $clusters[$key]['last_asked'],
+                $row->created_at ? strtotime((string) $row->created_at) : 0,
+            );
+
+            $pending = ['key' => $key, 'conversation_id' => $row->conversation_id];
+        }
+
+        $clusters = array_filter($clusters, static function (array $cluster) {
+            // Genuinely frequent: separate visitors asked it, and the bot could actually answer it.
+            return count($cluster['visitors']) >= self::FAQ_MIN_VISITORS && $cluster['answered'] > 0;
+        });
+
+        uasort($clusters, static function (array $a, array $b) {
+            return [count($b['visitors']), $b['asks'], $b['answered'], $b['last_asked']]
+                <=> [count($a['visitors']), $a['asks'], $a['answered'], $a['last_asked']];
+        });
+
+        $questions = [];
+
+        foreach ($clusters as $cluster) {
+            if (count($questions) >= $limit) {
+                break;
+            }
+
+            $question = $this->presentQuestion($this->pickQuestionVariant($cluster['variants']));
+
+            if ($question !== '' && ! $this->isDuplicateQuestion($question, $questions)) {
+                $questions[] = $question;
+            }
+        }
+
+        return $questions;
+    }
+
+    /**
+     * A reply counts as answered when the bot gave real content rather than a "no idea" fallback.
+     */
+    private function looksAnswered(string $reply): bool
+    {
+        $reply = $this->normalizeQuestionText($reply);
+
+        if (mb_strlen($reply) < 60) {
+            return false;
+        }
+
+        return ! preg_match(
+            '/\b(i (?:do not|don\'t) (?:have|know)|i(?:\'m| am) not sure|no information|not available in|could ?n\'t find|cannot find|unable to (?:find|locate)|wala|hindi ko)\b/iu',
+            $reply,
+        );
+    }
+
+    /**
+     * Sorted, lightly stemmed key terms — the identity of a question, so "traffic ordinance"
+     * and "what are the traffic ordinances?" land in the same cluster and count as one FAQ.
+     */
+    private function questionSignature(string $text): string
+    {
+        $terms = array_map(fn (string $term) => $this->stemTerm($term), $this->extractKnowledgeTerms($text));
+        $terms = array_values(array_unique($terms));
+        sort($terms);
+
+        return implode(' ', array_slice($terms, 0, 8));
+    }
+
+    private function stemTerm(string $term): string
+    {
+        $term = mb_strtolower($term);
+        $length = mb_strlen($term);
+
+        if ($length > 4 && str_ends_with($term, 'ies')) {
+            return mb_substr($term, 0, -3) . 'y';
+        }
+
+        if ($length > 3 && ! str_ends_with($term, 'ss') && str_ends_with($term, 's')) {
+            return mb_substr($term, 0, -1);
+        }
+
+        return $term;
+    }
+
+    /**
+     * Question-shaped lines sitting in the bot's own knowledge (JSON "question:" fields,
+     * FAQ headings in imported pages, and so on).
+     */
+    private function knowledgeQuestionSuggestions(Chatbot $bot, int $limit): array
+    {
+        $questions = [];
+
+        // Pass 1: explicit FAQ fields ("question: ..."), e.g. an uploaded FAQ JSON.
+        // Pass 2: plain question lines, but only inside sources the owner named as an FAQ.
+        foreach (['field', 'faq_source'] as $pass) {
+            if (count($questions) >= $limit) {
+                break;
+            }
+
+            $chunks = DocumentChunk::query()
+                ->join('knowledge_sources', 'knowledge_sources.id', '=', 'document_chunks.source_id')
+                ->where('document_chunks.chatbot_id', $bot->id)
+                ->where('knowledge_sources.status', 'ready')
+                ->when(
+                    $pass === 'field',
+                    fn ($query) => $query->where('document_chunks.content', 'ILIKE', '%question:%'),
+                    fn ($query) => $query
+                        ->where('knowledge_sources.name', 'ILIKE', '%faq%')
+                        ->where('document_chunks.content', 'ILIKE', '%?%'),
+                )
+                // Newest sources first, so a freshly uploaded FAQ is never crowded out by an older corpus.
+                ->orderByDesc('knowledge_sources.created_at')
+                ->orderBy('document_chunks.chunk_index')
+                ->limit(self::FAQ_CHUNK_SCAN_LIMIT)
+                ->pluck('document_chunks.content');
+
+            foreach ($chunks as $chunk) {
+                foreach (preg_split('/\R/u', (string) $chunk) ?: [] as $line) {
+                    if (count($questions) >= $limit) {
+                        return $questions;
+                    }
+
+                    $line = $this->normalizeQuestionText($line);
+
+                    if (preg_match('/^(?:question|q|faq)\s*[:\-]\s*(.+)$/iu', $line, $matches)) {
+                        $line = $this->normalizeQuestionText($matches[1]);
+                    } elseif ($pass === 'field' || ! str_ends_with($line, '?')) {
+                        continue;
+                    }
+
+                    if (! $this->isSuggestableQuestion($line) || count($this->extractKnowledgeTerms($line)) < 2) {
+                        continue;
+                    }
+
+                    $question = $this->presentQuestion($line);
+
+                    if ($question !== '' && ! $this->isDuplicateQuestion($question, $questions)) {
+                        $questions[] = $question;
+                    }
+                }
+            }
+        }
+
+        return $questions;
+    }
+
+    private function pickQuestionVariant(array $variants): string
+    {
+        $best = '';
+        $bestScore = [-1, 0, 0];
+
+        foreach ($variants as $text => $count) {
+            $text = (string) $text;
+            // Most-used phrasing first, then an actual question, then the tightest wording.
+            $score = [$count, str_ends_with($text, '?') ? 1 : 0, -mb_strlen($text)];
+
+            if ($score > $bestScore) {
+                $bestScore = $score;
+                $best = $text;
+            }
+        }
+
+        return $best;
+    }
+
+    private function normalizeQuestionText(string $value): string
+    {
+        $value = preg_replace('/\s+/u', ' ', $value) ?? $value;
+
+        return trim($value);
+    }
+
+    /**
+     * Keep short, self-contained questions and drop anything that looks like chatter,
+     * a pasted blob, or personal contact details.
+     */
+    private function isSuggestableQuestion(string $text): bool
+    {
+        $length = mb_strlen($text);
+
+        if ($length < self::FAQ_MIN_LENGTH || $length > self::FAQ_MAX_LENGTH) {
+            return false;
+        }
+
+        if (preg_match('/[<>{}]|https?:\/\/|\S+@\S+\.\S+|\d{7,}/u', $text)) {
+            return false;
+        }
+
+        // At least half the characters should be letters or spaces.
+        $letters = preg_match_all('/[\pL\s]/u', $text);
+
+        return $letters !== false && $letters >= $length / 2;
+    }
+
+    private function presentQuestion(string $text): string
+    {
+        $text = $this->normalizeQuestionText($text);
+
+        // "Hello! Do you have ..." reads badly on a chip — keep just the question.
+        $text = $this->normalizeQuestionText(
+            preg_replace('/^(?:hi|hello|hey|good (?:morning|afternoon|evening)|greetings)\b[\s,!.:;-]*/iu', '', $text) ?? $text,
+        );
+
+        if ($text === '' || mb_strlen($text) < self::FAQ_MIN_LENGTH) {
+            return '';
+        }
+
+        if (mb_strlen($text) > self::FAQ_MAX_LENGTH) {
+            return '';
+        }
+
+        return mb_strtoupper(mb_substr($text, 0, 1)) . mb_substr($text, 1);
+    }
+
+    private function isDuplicateQuestion(string $question, array $existing): bool
+    {
+        $key = $this->questionSignature($question);
+
+        foreach ($existing as $other) {
+            if ($key !== '' && $key === $this->questionSignature($other)) {
+                return true;
+            }
+        }
+
+        return in_array($question, $existing, true);
     }
 
     /**
@@ -231,6 +637,43 @@ class PublicChatController extends Controller
         }
 
         $path = trim((string) $bot->logo_path);
+        if ($path === '' || ! Storage::disk('public')->exists($path)) {
+            return response('Not found', 404);
+        }
+
+        $mimeType = Storage::disk('public')->mimeType($path) ?: 'application/octet-stream';
+
+        return response(Storage::disk('public')->get($path), 200, [
+            'Content-Type' => $mimeType,
+            'Cache-Control' => 'public, max-age=300',
+        ]);
+    }
+
+    /**
+     * Footer logos are streamed through the API rather than linked at their /storage/*.png path:
+     * an extensionless URL is not treated as a hotlinked image by CDNs sitting in front of us,
+     * which would otherwise 403 the request because the embedding site is a different domain.
+     */
+    public function footerLogo(Request $request, string $apiKey, string $index): Response
+    {
+        if (! Chatbot::supportsPublicKey() || ! Chatbot::supportsFooterBranding()) {
+            return response('Not found', 404);
+        }
+
+        $bot = $this->findActiveBotByKeys($apiKey, $apiKey);
+
+        if (! $bot || ! $this->isAllowedDomain($request, $bot)) {
+            return response('Not found', 404);
+        }
+
+        $logos = array_values(array_filter(
+            is_array($bot->footer_logos) ? $bot->footer_logos : [],
+            static fn ($logo) => is_array($logo) && trim((string) ($logo['path'] ?? '')) !== '',
+        ));
+
+        $position = (int) $index;
+        $path = trim((string) ($logos[$position]['path'] ?? ''));
+
         if ($path === '' || ! Storage::disk('public')->exists($path)) {
             return response('Not found', 404);
         }
@@ -1087,11 +1530,13 @@ LIMIT 8
   var visitorId = localStorage.getItem(STORE_KEY);
   if (!visitorId) { visitorId = 'v_' + Math.random().toString(36).slice(2) + Date.now().toString(36); localStorage.setItem(STORE_KEY, visitorId); }
   var DEFAULT_CACHE_MINUTES = 10;
+  var FOOTER_LOGO_BASE_PX = 16;
   var EMBED_CACHE_MINUTES = parseCacheMinutes(explicitCacheMinutes);
 
   var closeTimer = null;
-  var state = { open: false, closing: false, conversationId: null, messages: [], sending: false, bot: null, pageContext: null, formContext: null, pendingFormSubmit: null, lastPageSignature: '', pageReadLabel: 'Scanning page...', draftMessage: '', draftEmail: '', activeField: null, headerCompact: false, headerProgress: 0, panelAnimatedIn: false };
+  var state = { open: false, closing: false, conversationId: null, messages: [], sending: false, bot: null, pageContext: null, formContext: null, pendingFormSubmit: null, lastPageSignature: '', pageReadLabel: 'Scanning page...', draftMessage: '', draftEmail: '', activeField: null, headerCompact: false, headerProgress: 0, headerTargetProgress: 0, headerFrame: null, ctaMini: false, panelAnimatedIn: false };
   restoreSession();
+  state.ctaMini = shouldMiniCta();
 
   fetch(ORIGIN + '/api/public/bot/' + publicKey).then(function(r){return r.json();}).then(function(b){
     if (b && b.logo_url && !/^https?:\/\//i.test(b.logo_url)) {
@@ -1115,7 +1560,7 @@ LIMIT 8
     '.helix-bubble{position:fixed;bottom:20px;z-index:2147483646;width:60px;height:60px;border-radius:20px;border:1px solid rgba(255,255,255,0.18);cursor:pointer;display:flex;align-items:center;justify-content:center;color:#fff;box-shadow:0 18px 44px rgba(15,23,42,0.28);transition:transform .24s ease,box-shadow .24s ease,border-radius .24s ease;overflow:hidden;padding:0;backdrop-filter:blur(18px)}',
     '.helix-bubble:hover{transform:translateY(-2px) scale(1.03)}',
     '.helix-bubble.is-active{transform:scale(.96);border-radius:18px;box-shadow:0 24px 48px rgba(15,23,42,0.32)}',
-    '.helix-bubble img{width:100%;height:100%;object-fit:cover;display:block;border-radius:inherit;background:transparent}',
+    '.helix-bubble img{width:100%;height:100%;object-fit:cover;display:block;border-radius:inherit;background:transparent;transform:scale(var(--helix-logo-scale,1));transform-origin:center;transition:transform .18s ease}',
     '.helix-bubble svg{width:26px;height:26px}',
     '.helix-panel{position:fixed;bottom:96px;z-index:2147483647;width:390px;max-width:calc(100vw - 24px);height:620px;max-height:calc(100vh - 124px);background:#f8fafc;border-radius:28px;box-shadow:0 34px 80px rgba(15,23,42,0.30);display:flex;flex-direction:column;overflow:hidden;font-size:14px;color:#0f172a;border:1px solid rgba(148,163,184,0.18);transform-origin:calc(100% - 28px) calc(100% - 20px)}',
     '.helix-panel[data-side="right"]{right:20px}',
@@ -1123,25 +1568,25 @@ LIMIT 8
     '.helix-panel.is-opening{animation:helixPanelIn .34s cubic-bezier(.22,1,.36,1) both}',
     '.helix-panel.is-closing{pointer-events:none;animation:helixPanelOut .24s cubic-bezier(.4,0,1,1) both}',
     '.helix-panel.is-compact .helix-header-copy,.helix-panel.is-compact .helix-page-status{pointer-events:none}',
-    '.helix-header{position:relative;padding:var(--helix-header-padding,10px 12px 12px);color:#fff;display:flex;flex-direction:column;gap:var(--helix-header-gap,8px);overflow:hidden;transition:padding .08s linear,gap .08s linear}',
+    '.helix-header{position:relative;padding:var(--helix-header-padding,10px 12px 12px);color:#fff;display:flex;flex-direction:column;gap:var(--helix-header-gap,8px);overflow:hidden;will-change:padding}',
     '.helix-header::before{content:"";position:absolute;inset:-18% auto auto -16%;width:180px;height:180px;border-radius:999px;background:rgba(255,255,255,0.20);filter:blur(10px)}',
     '.helix-header::after{content:"";position:absolute;right:-56px;top:22px;width:180px;height:180px;border-radius:999px;background:rgba(255,255,255,0.14);filter:blur(24px)}',
     '.helix-header-top,.helix-header-copy,.helix-page-status,.helix-header-actions{position:relative;z-index:1}',
     '.helix-header-top{display:flex;align-items:center;justify-content:space-between;gap:8px}',
     '.helix-brand{display:flex;align-items:center;gap:8px;min-width:0;flex:1}',
-    '.helix-brand-logo{width:var(--helix-logo-size,36px);height:var(--helix-logo-size,36px);border-radius:var(--helix-logo-radius,12px);overflow:hidden;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,0.12);box-shadow:inset 0 0 0 1px rgba(255,255,255,0.12);flex-shrink:0;transition:width .08s linear,height .08s linear,border-radius .08s linear}',
+    '.helix-brand-logo{width:var(--helix-logo-size,36px);height:var(--helix-logo-size,36px);border-radius:var(--helix-logo-radius,12px);overflow:hidden;display:flex;align-items:center;justify-content:center;background:rgba(255,255,255,0.12);box-shadow:inset 0 0 0 1px rgba(255,255,255,0.12);flex-shrink:0;will-change:width,height}',
     '.helix-brand-logo img{width:100%;height:100%;object-fit:cover;display:block}',
     '.helix-brand-fallback{font-size:14px;font-weight:800;letter-spacing:.04em;text-transform:uppercase}',
     '.helix-brand-copy{min-width:0;padding-top:0;display:flex;flex-direction:column;justify-content:center}',
-    '.helix-brand-label{font-size:var(--helix-brand-label-size,9px);letter-spacing:.09em;text-transform:uppercase;opacity:.72;margin-bottom:1px;line-height:1.1;transition:font-size .08s linear}',
-    '.helix-brand-name{font-size:var(--helix-brand-name-size,16px);font-weight:700;line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px;transition:font-size .08s linear}',
+    '.helix-brand-label{font-size:var(--helix-brand-label-size,9px);letter-spacing:.09em;text-transform:uppercase;opacity:.72;margin-bottom:1px;line-height:1.1}',
+    '.helix-brand-name{font-size:var(--helix-brand-name-size,16px);font-weight:700;line-height:1.1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px}',
     '.helix-close{width:30px;height:30px;display:inline-flex;align-items:center;justify-content:center;background:rgba(255,255,255,0.12);border:none;color:#fff;cursor:pointer;font-size:22px;font-weight:400;line-height:1;padding:0 0 2px 0;border-radius:999px;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.14);backdrop-filter:blur(6px);flex-shrink:0;transition:background .18s ease,transform .18s ease}',
     '.helix-close:hover{background:rgba(255,255,255,0.18);transform:translateY(-1px)}',
-    '.helix-header-copy{display:flex;flex-direction:column;gap:6px;max-height:var(--helix-header-copy-height,220px);opacity:var(--helix-header-copy-opacity,1);transform:translateY(var(--helix-header-copy-y,0));transform-origin:top left;overflow:hidden;transition:opacity .08s linear,transform .08s linear,max-height .08s linear}',
+    '.helix-header-copy{display:flex;flex-direction:column;gap:6px;max-height:var(--helix-header-copy-height,220px);opacity:var(--helix-header-copy-opacity,1);transform:translateY(var(--helix-header-copy-y,0));transform-origin:top left;overflow:hidden;will-change:opacity,transform,max-height}',
     '.helix-eyebrow{font-size:12px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;opacity:.78}',
-    '.helix-headline{font-size:24px;line-height:1.02;font-weight:800;letter-spacing:-0.03em;max-width:240px}',
+    '.helix-headline{font-size:var(--helix-headline-size,24px);line-height:1.14;font-weight:800;letter-spacing:-0.03em;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
     '.helix-subcopy{font-size:13px;line-height:1.55;max-width:250px;color:rgba(255,255,255,0.86)}',
-    '.helix-page-status{display:inline-flex;align-items:center;gap:8px;align-self:flex-start;max-width:100%;padding:var(--helix-status-padding,10px 14px);border-radius:16px;background:rgba(255,255,255,0.92);color:#334155;font-size:12px;font-weight:600;box-shadow:0 12px 24px rgba(15,23,42,0.12);max-height:var(--helix-status-height,56px);opacity:var(--helix-status-opacity,1);transform:translateY(var(--helix-status-y,0));overflow:hidden;transition:opacity .08s linear,transform .08s linear,max-height .08s linear,padding .08s linear}',
+    '.helix-page-status{display:inline-flex;align-items:center;gap:8px;align-self:flex-start;max-width:100%;padding:var(--helix-status-padding,10px 14px);border-radius:16px;background:rgba(255,255,255,0.92);color:#334155;font-size:12px;font-weight:600;box-shadow:0 12px 24px rgba(15,23,42,0.12);max-height:var(--helix-status-height,56px);opacity:var(--helix-status-opacity,1);transform:translateY(var(--helix-status-y,0));overflow:hidden;will-change:opacity,transform,max-height}',
     '.helix-page-status::before{content:"";width:8px;height:8px;border-radius:999px;background:currentColor;opacity:.65;flex-shrink:0}',
     '.helix-shell{flex:1;display:flex;flex-direction:column;min-height:0;background:linear-gradient(180deg,rgba(248,250,252,0.92) 0%,#ffffff 22%,#ffffff 100%)}',
     '.helix-body{flex:1;overflow-y:auto;padding:16px 16px 12px;background:transparent;display:flex;flex-direction:column;gap:10px}',
@@ -1156,6 +1601,13 @@ LIMIT 8
     '.helix-msg a{color:#3b82f6;text-decoration:underline;text-underline-offset:2px}',
     '.helix-msg code{background:#f1f5f9;padding:0.15em 0.4em;border-radius:4px;font-size:0.9em;font-family:monospace}',
     '.helix-msg .helix-num{color:#3b82f6;font-weight:700;margin-right:0.3em}',
+    '.helix-faqs{display:flex;flex-direction:column;gap:7px;align-self:stretch;margin-top:2px}',
+    '.helix-faqs-label{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#64748b;padding-left:2px}',
+    '.helix-faq-chip{display:block;width:100%;max-width:100%;margin:0;text-align:left;padding:11px 14px;border-radius:16px;border:1px solid var(--helix-faq-border,rgba(226,232,240,0.95)) !important;background:var(--helix-faq-bg,rgba(255,255,255,0.98)) !important;color:var(--helix-faq-color,#0f172a) !important;font:inherit;font-size:13px;line-height:1.45;letter-spacing:normal;text-transform:none;white-space:normal;word-break:break-word;overflow-wrap:anywhere;-webkit-appearance:none;appearance:none;cursor:pointer;box-shadow:0 8px 20px rgba(15,23,42,0.05);transition:transform .16s ease,box-shadow .16s ease,border-color .16s ease}',
+    '.helix-faq-chip:hover,.helix-faq-chip:focus-visible{background:var(--helix-faq-hover-bg,#eef2ff) !important;border-color:var(--helix-faq-hover-border,rgba(124,92,255,0.45)) !important;color:var(--helix-faq-hover-color,#0f172a) !important;transform:translateY(-1px);box-shadow:0 12px 26px rgba(15,23,42,0.10)}',
+    '.helix-faq-chip:focus-visible{outline:2px solid var(--helix-faq-hover-border,rgba(124,92,255,0.45));outline-offset:2px}',
+    '.helix-faq-chip:active{background:var(--helix-faq-active-bg,#e0e7ff) !important;color:var(--helix-faq-active-color,#0f172a) !important;transform:translateY(0);box-shadow:0 6px 16px rgba(15,23,42,0.08)}',
+    '.helix-faq-chip:disabled{opacity:.6;cursor:default;transform:none}',
     '.helix-typing{display:flex;gap:4px;padding:14px}',
     '.helix-typing-wrapper{transition:opacity 0.25s ease,transform 0.25s ease}',
     '.helix-typing span{width:6px;height:6px;border-radius:50%;background:#94a3b8;animation:helixBounce 1.2s infinite}',
@@ -1163,6 +1615,16 @@ LIMIT 8
     '@keyframes helixBounce{0%,80%,100%{opacity:.3;transform:translateY(0)}40%{opacity:1;transform:translateY(-4px)}}',
     '@keyframes helixPanelIn{0%{opacity:0;transform:translateY(24px) scale(.94)}100%{opacity:1;transform:translateY(0) scale(1)}}',
     '@keyframes helixPanelOut{0%{opacity:1;transform:translateY(0) scale(1)}100%{opacity:0;transform:translateY(18px) scale(.96)}}',
+    '.helix-cta{padding:0 14px 8px;background:transparent;transition:padding .3s cubic-bezier(.22,1,.36,1)}',
+    '.helix-cta.is-mini{padding:0 14px 6px}',
+    '.helix-cta-link{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;max-width:100%;margin:0;padding:11px 16px;border-radius:16px;border:1px solid var(--helix-cta-border,rgba(124,92,255,0.35)) !important;background:var(--helix-cta-bg,#ffffff) !important;color:var(--helix-cta-color,#0f172a) !important;font:inherit;font-size:13px;font-weight:700;line-height:1.35;letter-spacing:normal;text-transform:none;text-decoration:none !important;white-space:normal;word-break:break-word;overflow-wrap:anywhere;cursor:pointer;box-shadow:0 10px 24px rgba(15,23,42,0.08);transition:max-width .3s cubic-bezier(.22,1,.36,1),padding .3s cubic-bezier(.22,1,.36,1),font-size .3s cubic-bezier(.22,1,.36,1),box-shadow .3s ease,transform .16s ease,background .16s ease,color .16s ease}',
+    '.helix-cta-link.is-mini{padding:6px 12px;font-size:11.5px;gap:6px;border-radius:12px;box-shadow:0 5px 14px rgba(15,23,42,0.06)}',
+    '.helix-cta-link.is-mini span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
+    '.helix-cta-link.is-mini svg{width:13px;height:13px}',
+    '.helix-cta-link:hover,.helix-cta-link:focus-visible{background:var(--helix-cta-hover-bg,#eef2ff) !important;color:var(--helix-cta-hover-color,#0f172a) !important;transform:translateY(-1px);box-shadow:0 14px 30px rgba(15,23,42,0.12)}',
+    '.helix-cta-link:focus-visible{outline:2px solid var(--helix-cta-border,rgba(124,92,255,0.35));outline-offset:2px}',
+    '.helix-cta-link:active{transform:translateY(0)}',
+    '.helix-cta-link svg{width:15px;height:15px;flex-shrink:0}',
     '.helix-composer{padding:0 14px 14px;background:transparent}',
     '.helix-composer-card{border-radius:22px;background:rgba(255,255,255,0.96);border:1px solid rgba(226,232,240,0.95);box-shadow:0 18px 36px rgba(15,23,42,0.10);overflow:hidden}',
     '.helix-email{padding:12px 12px 0;background:transparent;border-top:none}',
@@ -1175,9 +1637,11 @@ LIMIT 8
     '.helix-send{border:none;color:#fff;border-radius:16px;padding:0 18px;cursor:pointer;font-weight:700;min-width:88px;height:46px;align-self:flex-end;box-shadow:0 14px 24px rgba(15,23,42,0.16);transition:transform .2s ease,box-shadow .2s ease}',
     '.helix-send:hover{transform:translateY(-1px);box-shadow:0 18px 28px rgba(15,23,42,0.18)}',
     '.helix-send:disabled{opacity:.5;cursor:not-allowed}',
-    '.helix-foot{text-align:center;padding:0 0 14px;font-size:11px;color:#94a3b8;background:transparent;border-top:none}',
+    '.helix-foot{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:6px 10px;text-align:center;padding:0 14px 14px;font-size:11px;color:#94a3b8;background:transparent;border-top:none}',
+    '.helix-foot-logos{display:inline-flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:center}',
+    '.helix-foot-logos img{height:16px !important;width:auto !important;max-width:80px !important;min-width:0 !important;min-height:0 !important;max-height:16px !important;display:inline-block !important;opacity:1 !important;visibility:visible !important;position:static !important;margin:0 !important;padding:0 !important;border:0 !important;background:transparent !important;box-shadow:none !important;filter:none !important;transform:none !important;clip-path:none !important;object-fit:contain;border-radius:3px}',
     '.helix-foot a{color:#64748b;text-decoration:none}',
-    ' (max-width:640px){.helix-panel{bottom:86px;width:min(390px,calc(100vw - 16px));max-width:calc(100vw - 16px);height:min(620px,calc(100vh - 100px));border-radius:24px}.helix-header{padding:var(--helix-header-padding,9px 11px 11px)}.helix-headline{font-size:22px;max-width:100%}.helix-brand-name{max-width:170px}.helix-composer{padding:0 10px 10px}.helix-body{padding:14px 12px 10px}.helix-page-status{max-width:100%}}',
+    ' (max-width:640px){.helix-panel{bottom:86px;width:min(390px,calc(100vw - 16px));max-width:calc(100vw - 16px);height:min(620px,calc(100vh - 100px));border-radius:24px}.helix-header{padding:var(--helix-header-padding,9px 11px 11px)}.helix-headline{max-width:100%}.helix-brand-name{max-width:170px}.helix-composer{padding:0 10px 10px}.helix-body{padding:14px 12px 10px}.helix-page-status{max-width:100%}}',
   ].join('');
   root.appendChild(style);
 
@@ -1645,6 +2109,10 @@ LIMIT 8
       return result;
     };
 
+    window.addEventListener('resize', function(){
+      var openPanel = root.querySelector('.helix-panel');
+      if (openPanel) fitHeadline(openPanel);
+    });
     window.addEventListener('popstate', function(){ schedulePageContextRefresh(250); });
     window.addEventListener('hashchange', function(){ schedulePageContextRefresh(250); });
     window.addEventListener('load', function(){ schedulePageContextRefresh(250); });
@@ -1810,6 +2278,31 @@ LIMIT 8
     return luminance(hex) > 0.64 ? '#0f172a' : '#ffffff';
   }
 
+  function srgbChannel(value){
+    var v = value / 255;
+    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  }
+
+  function relativeLuminance(hex){
+    var c = hexToRgb(hex);
+    return (0.2126 * srgbChannel(c.r)) + (0.7152 * srgbChannel(c.g)) + (0.0722 * srgbChannel(c.b));
+  }
+
+  function contrastRatio(a, b){
+    var la = relativeLuminance(a);
+    var lb = relativeLuminance(b);
+    return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+  }
+
+  /**
+   * Use the tinted tone when it is legible on the given background, otherwise fall back
+   * to plain black or white — a bot themed near-white must not get pale-on-pale text.
+   */
+  function readableText(background, preferred){
+    if (contrastRatio(preferred, background) >= 4.5) return preferred;
+    return contrastRatio('#0f172a', background) >= contrastRatio('#ffffff', background) ? '#0f172a' : '#ffffff';
+  }
+
   function deriveTheme(color){
     var primary = /^#[0-9a-fA-F]{6}$/.test(String(color || '')) ? color : '#7c5cff';
     var deep = mixHex(primary, '#0f172a', 0.34);
@@ -1836,17 +2329,49 @@ LIMIT 8
     panel.style.setProperty(name, value);
   }
 
+  function nextFrame(fn){
+    return window.requestAnimationFrame ? window.requestAnimationFrame(fn) : setTimeout(fn, 16);
+  }
+
+  function cancelFrame(handle){
+    if (handle == null) return;
+    if (window.cancelAnimationFrame) window.cancelAnimationFrame(handle);
+    else clearTimeout(handle);
+  }
+
+  /**
+   * Scroll sets a target; the header eases toward it frame by frame so the collapse
+   * never snaps or stutters, however coarse the scroll events are.
+   */
   function updateCompactHeader(panel, scrollTop){
     if (!panel) return;
     var body = panel.querySelector('#helix-body');
     var maxScroll = body ? Math.max(0, body.scrollHeight - body.clientHeight) : 0;
     var collapseDistance = Math.max(72, Math.min(120, maxScroll || 120));
-    var progress = maxScroll <= 2 ? 0 : clamp(Number(scrollTop || 0) / collapseDistance, 0, 1);
-    if (progress < 0.02) progress = 0;
-    if (progress > 0.98) progress = 1;
+    state.headerTargetProgress = maxScroll <= 2 ? 0 : clamp(Number(scrollTop || 0) / collapseDistance, 0, 1);
+    animateHeader(panel);
+  }
 
-    state.headerProgress = progress;
-    state.headerCompact = progress === 1;
+  function animateHeader(panel){
+    if (state.headerFrame != null) return;
+    var tick = function(){
+      state.headerFrame = null;
+      if (!panel || (panel.isConnected === false)) return;
+      var target = state.headerTargetProgress;
+      var next = state.headerProgress + ((target - state.headerProgress) * 0.2);
+      if (Math.abs(target - next) < 0.002) next = target;
+      applyHeaderProgress(panel, next);
+      if (next !== target) state.headerFrame = nextFrame(tick);
+    };
+    state.headerFrame = nextFrame(tick);
+  }
+
+  function applyHeaderProgress(panel, value){
+    if (!panel) return;
+    state.headerProgress = value;
+    // Smoothstep so the ends of the collapse ease instead of arriving abruptly.
+    var progress = value * value * (3 - (2 * value));
+    state.headerCompact = value >= 0.995;
     if (state.headerCompact) panel.classList.add('is-compact');
     else panel.classList.remove('is-compact');
 
@@ -2101,6 +2626,102 @@ LIMIT 8
     });
   }
 
+  function shouldMiniCta(){
+    var answers = 0;
+    for (var i = 0; i < state.messages.length; i++) {
+      if (state.messages[i] && state.messages[i].role === 'assistant' && ++answers > 1) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The welcome line is kept to a single row; shrink the type until it fits rather than
+   * wrapping, with a readable floor (past that the CSS ellipsis takes over).
+   */
+  function fitHeadline(panel){
+    var el = panel && panel.querySelector('.helix-headline');
+    if (!el) return;
+    var max = 24, min = 14;
+    setPanelVar(panel, '--helix-headline-size', px(max));
+    var available = el.clientWidth;
+    if (!available || el.scrollWidth <= available) return;
+    var size = clamp((available / el.scrollWidth) * max, min, max);
+    setPanelVar(panel, '--helix-headline-size', px(size));
+    // Glyph widths do not scale perfectly linearly, so nudge down if it still overflows.
+    for (var i = 0; i < 8 && size > min && el.scrollWidth > el.clientWidth + 1; i++) {
+      size = Math.max(min, size - 0.5);
+      setPanelVar(panel, '--helix-headline-size', px(size));
+    }
+  }
+
+  /**
+   * Footer credit: the bot's own text and up to three co-brand logos when configured,
+   * otherwise the default Helix credit.
+   */
+  /** Bubble logo zoom, as a CSS scale factor clamped to the range the dashboard offers. */
+  function logoScale(){
+    var pct = Number(state.bot && state.bot.logo_scale);
+    if (!isFinite(pct) || pct <= 0) pct = 100;
+    return (Math.max(50, Math.min(200, pct)) / 100).toFixed(2);
+  }
+
+  function buildFooterMarkup(){
+    var footer = state.bot && state.bot.footer;
+    var text = footer ? String(footer.text || '').trim() : '';
+    var logos = (footer && footer.logos) || [];
+    var safeLogos = [];
+
+    for (var i = 0; i < logos.length && safeLogos.length < 3; i++) {
+      var entry = logos[i] || '';
+      var url = String(typeof entry === 'string' ? entry : (entry.url || '')).trim();
+      if (!/^https?:\/\//i.test(url)) continue;
+      var pct = Number(typeof entry === 'string' ? 100 : entry.scale);
+      if (!isFinite(pct) || pct <= 0) pct = 100;
+      // Height rather than transform, so a resized logo still occupies its real space in the row.
+      var height = Math.round(FOOTER_LOGO_BASE_PX * (Math.max(50, Math.min(200, pct)) / 100));
+      safeLogos.push({ url: url, height: height });
+    }
+
+    if (!text && !safeLogos.length) {
+      return '<div class="helix-foot">Powered by <a href="' + ORIGIN + '">Helix</a></div>';
+    }
+
+    var markup = '<div class="helix-foot">';
+    if (text) markup += '<span>' + escapeHtml(text) + '</span>';
+    if (safeLogos.length) {
+      markup += '<span class="helix-foot-logos">';
+      for (var j = 0; j < safeLogos.length; j++) {
+        markup += '<img src="' + escapeHtml(safeLogos[j].url) + '" alt="" style="height:' + safeLogos[j].height + 'px !important;max-height:' + safeLogos[j].height + 'px !important"/>';
+      }
+      markup += '</span>';
+    }
+
+    return markup + '</div>';
+  }
+
+  function safeCta(){
+    var cta = state.bot && state.bot.cta;
+    if (!cta) return null;
+    var url = String(cta.url || '').trim();
+    // Never render anything but a plain http(s) destination.
+    if (!/^https?:\/\//i.test(url)) return null;
+    return { url: url, label: String(cta.label || '').trim() || 'Visit website' };
+  }
+
+  function suggestedFaqs(){
+    var list = (state.bot && state.bot.faqs) || [];
+    if (!list.length) return [];
+    for (var i = 0; i < state.messages.length; i++) {
+      if (state.messages[i] && state.messages[i].role === 'user') return [];
+    }
+    var out = [];
+    for (var j = 0; j < list.length && out.length < 5; j++) {
+      var q = String(list[j] || '').trim();
+      if (q) out.push(q);
+    }
+    return out;
+  }
+
   function render(){
     if (!state.bot) return;
     var color = state.bot.primary_color || '#7c5cff';
@@ -2114,12 +2735,21 @@ LIMIT 8
     var emailSection = collectEmail && !hideEmailField
       ? '<div class="helix-email"><input id="helix-email" type="email" placeholder="Your email" autocomplete="email" inputmode="email" required/></div>'
       : '';
+    var footerMarkup = buildFooterMarkup();
+    var cta = safeCta();
+    var ctaMiniClass = state.ctaMini ? ' is-mini' : '';
+    var ctaMarkup = cta
+      ? '<div class="helix-cta' + ctaMiniClass + '"><a class="helix-cta-link' + ctaMiniClass + '" href="' + escapeHtml(cta.url) + '" target="_blank" rel="noopener noreferrer nofollow">' +
+          '<span>' + escapeHtml(cta.label) + '</span>' +
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7M9 7h8v8"/></svg>' +
+        '</a></div>'
+      : '';
     root.innerHTML = '';
     root.appendChild(style);
 
     var bubble = document.createElement('button');
     bubble.className = 'helix-bubble' + ((state.open || state.closing) ? ' is-active' : '');
-    bubble.setAttribute('style', pos + ';background:' + (state.bot.logo_url ? 'transparent' : theme.bubbleGradient) + ';color:' + theme.primaryText);
+    bubble.setAttribute('style', pos + ';background:' + (state.bot.logo_url ? 'transparent' : theme.bubbleGradient) + ';color:' + theme.primaryText + ';--helix-logo-scale:' + logoScale());
     bubble.setAttribute('aria-label', 'Open chat');
     bubble.innerHTML = (state.open || state.closing)
       ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 6L18 18M6 18L18 6"/></svg>'
@@ -2152,16 +2782,57 @@ LIMIT 8
       '</div>' +
       '<div class="helix-shell" style="background:' + theme.bodyGlow + '">' +
         '<div class="helix-body" id="helix-body"></div>' +
+        ctaMarkup +
         '<div class="helix-composer"><div class="helix-composer-card">' +
           emailSection +
           '<form class="helix-form" id="helix-form"><textarea class="helix-input" id="helix-input" placeholder="Ask anything..." autocomplete="off" rows="1"></textarea><button class="helix-send" id="helix-send" type="submit" style="background:' + theme.userGradient + ';color:' + theme.primaryText + '">Send</button></form>' +
         '</div></div>' +
-        '<div class="helix-foot">Powered by <a href="' + ORIGIN + '">Helix</a></div>' +
+        footerMarkup +
       '</div>';
     root.appendChild(panel);
     if (!state.closing && !state.panelAnimatedIn) {
       state.panelAnimatedIn = true;
     }
+
+    // Suggestion chips tint toward the bot's own colour instead of inheriting the host site's buttons.
+    setPanelVar(panel, '--helix-faq-bg', 'rgba(255,255,255,0.98)');
+    setPanelVar(panel, '--helix-faq-border', rgba(theme.primary, 0.18));
+    setPanelVar(panel, '--helix-faq-color', '#0f172a');
+    setPanelVar(panel, '--helix-faq-hover-bg', theme.primaryMist);
+    setPanelVar(panel, '--helix-faq-hover-border', rgba(theme.primary, 0.45));
+    setPanelVar(panel, '--helix-faq-hover-color', readableText(theme.primaryMist, theme.primaryDeep));
+    setPanelVar(panel, '--helix-faq-active-bg', theme.primarySoft);
+    setPanelVar(panel, '--helix-faq-active-color', readableText(theme.primarySoft, mixHex(theme.primary, '#0f172a', 0.6)));
+
+    // render() rebuilds the panel, so the collapse is applied one frame after insertion —
+    // the element needs a starting frame in its old size for the transition to run at all.
+    var ctaLinkEl = panel.querySelector('.helix-cta-link');
+    if (ctaLinkEl) {
+      var wantsMiniCta = shouldMiniCta();
+      if (state.ctaMini !== wantsMiniCta) {
+        nextFrame(function(){
+          if (ctaLinkEl.isConnected === false) return;
+          var ctaWrapEl = panel.querySelector('.helix-cta');
+          if (wantsMiniCta) {
+            ctaLinkEl.classList.add('is-mini');
+            if (ctaWrapEl) ctaWrapEl.classList.add('is-mini');
+          } else {
+            ctaLinkEl.classList.remove('is-mini');
+            if (ctaWrapEl) ctaWrapEl.classList.remove('is-mini');
+          }
+          state.ctaMini = wantsMiniCta;
+        });
+      }
+    }
+
+    // Outlined rather than filled, so the link does not compete with the Send button.
+    setPanelVar(panel, '--helix-cta-bg', '#ffffff');
+    setPanelVar(panel, '--helix-cta-border', rgba(theme.primary, 0.35));
+    setPanelVar(panel, '--helix-cta-color', readableText('#ffffff', theme.primaryDeep));
+    setPanelVar(panel, '--helix-cta-hover-bg', theme.primaryMist);
+    setPanelVar(panel, '--helix-cta-hover-color', readableText(theme.primaryMist, theme.primaryDeep));
+
+    fitHeadline(panel);
 
     var body = panel.querySelector('#helix-body');
     state.messages.forEach(function(m){
@@ -2173,6 +2844,35 @@ LIMIT 8
       else div.innerHTML = renderMessageHtml(m.content);
       body.appendChild(div);
     });
+    var faqs = suggestedFaqs();
+    if (faqs.length && !state.sending) {
+      var faqWrap = document.createElement('div');
+      faqWrap.className = 'helix-faqs';
+      var faqLabel = document.createElement('div');
+      faqLabel.className = 'helix-faqs-label';
+      faqLabel.textContent = 'Frequently asked';
+      faqWrap.appendChild(faqLabel);
+      faqs.forEach(function(question){
+        var chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'helix-faq-chip';
+        chip.textContent = question;
+        chip.onclick = function(){
+          if (state.sending) return;
+          var emailField = panel.querySelector('#helix-email');
+          var chipEmail = emailField ? emailField.value.trim() : getDraftOrStoredEmail();
+          if (collectEmail && !isValidEmail(chipEmail)) {
+            if (emailField) emailField.focus();
+            syncComposerState(panel);
+            return;
+          }
+          if (collectEmail) persistVisitorEmail(chipEmail);
+          send(question);
+        };
+        faqWrap.appendChild(chip);
+      });
+      body.appendChild(faqWrap);
+    }
     if (state.sending) {
       var t = document.createElement('div');
       t.className = 'helix-msg bot helix-typing-wrapper';
@@ -2181,17 +2881,12 @@ LIMIT 8
       body.appendChild(t);
     }
     body.scrollTop = body.scrollHeight;
-    var headerScrollFrame = null;
-    function syncHeaderCollapse(){
-      headerScrollFrame = null;
-      updateCompactHeader(panel, body.scrollTop);
-    }
-    body.onscroll = function(){
-      if (headerScrollFrame) return;
-      headerScrollFrame = window.requestAnimationFrame
-        ? window.requestAnimationFrame(syncHeaderCollapse)
-        : setTimeout(syncHeaderCollapse, 16);
-    };
+    body.onscroll = function(){ updateCompactHeader(panel, body.scrollTop); };
+    cancelFrame(state.headerFrame);
+    state.headerFrame = null;
+    // Match the new panel to the current scroll position before easing takes over.
+    state.headerTargetProgress = state.headerProgress;
+    applyHeaderProgress(panel, state.headerProgress);
     updateCompactHeader(panel, body.scrollTop);
 
     panel.querySelector('.helix-close').onclick = function(){ closeWidget(); };

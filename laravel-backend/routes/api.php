@@ -23,6 +23,7 @@ Route::post('/auth/google', [AuthController::class, 'google']);
 Route::get('/public/widget.js', [PublicChatController::class, 'widget']);
 Route::get('/public/bot/{apiKey}', [PublicChatController::class, 'bot']);
 Route::get('/public/logo/{apiKey}', [PublicChatController::class, 'logo']);
+Route::get('/public/footer-logo/{apiKey}/{index}', [PublicChatController::class, 'footerLogo']);
 Route::post('/public/chat', [PublicChatController::class, 'chat']);
 
 Route::middleware(BearerTokenAuth::class)->group(function () {
@@ -38,6 +39,8 @@ Route::middleware(BearerTokenAuth::class)->group(function () {
     Route::post('/chatbots/{chatbot}/playground-chat', [ChatbotController::class, 'playgroundChat']);
     Route::post('/chatbots/{chatbot}/logo', [ChatbotController::class, 'uploadLogo']);
     Route::delete('/chatbots/{chatbot}/logo', [ChatbotController::class, 'deleteLogo']);
+    Route::post('/chatbots/{chatbot}/footer-logos', [ChatbotController::class, 'uploadFooterLogo']);
+    Route::delete('/chatbots/{chatbot}/footer-logos/{index}', [ChatbotController::class, 'deleteFooterLogo']);
     Route::get('/chatbots/{chatbot}/sources', [ChatbotController::class, 'sources']);
     Route::post('/chatbots/{chatbot}/sources/text', [ChatbotController::class, 'ingestText']);
     Route::post('/chatbots/{chatbot}/sources/url', [ChatbotController::class, 'ingestUrl']);

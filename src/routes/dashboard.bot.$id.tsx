@@ -10,13 +10,14 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { Slider } from "@/components/ui/slider";
 import {
   ArrowLeft, Bot, Check, Code2, Copy, Database, FileText, Globe, Loader2,
   MessageSquare, Plus, Send, Settings, Trash2, Upload, BarChart3, Sparkles, Download,
   X, Image as ImageIcon,
 } from "lucide-react";
 import {
-  getBot, updateBot, deleteBot, uploadBotLogo, deleteBotLogo, listSources, deleteSource,
+  getBot, updateBot, deleteBot, uploadBotLogo, deleteBotLogo, uploadFooterLogo, deleteFooterLogo, listSources, deleteSource,
   ingestUrl, ingestRawText, ingestFile, downloadSourceChunks,
   listConversations, getMessages, getAnalytics, playgroundChat,
 } from "@/lib/bots-api";
@@ -99,12 +100,15 @@ function BotAvatar({
   bot,
   className = "h-12 w-12 rounded-xl",
   iconClassName = "h-6 w-6",
+  scale,
 }: {
   bot: any;
   className?: string;
   iconClassName?: string;
+  scale?: number;
 }) {
   const logoUrl = bot?.logo_url;
+  const zoom = Math.max(50, Math.min(200, Number(scale ?? bot?.logo_scale ?? 100))) / 100;
 
   return (
     <div
@@ -115,7 +119,8 @@ function BotAvatar({
         <img
           src={logoUrl}
           alt={`${bot?.name || "Bot"} logo`}
-          className="h-full w-full object-contain"
+          className="h-full w-full object-contain transition-transform"
+          style={{ transform: `scale(${zoom})` }}
         />
       ) : (
         <Bot className={`${iconClassName} text-white`} />
@@ -168,7 +173,7 @@ function KnowledgeTab({ botId }: { botId: string }) {
     try {
       for (const f of Array.from(files)) {
         const ext = f.name.split(".").pop()?.toLowerCase();
-        const supported = ext === "pdf" || ext === "docx" || ext === "txt" || ext === "md";
+        const supported = ext === "pdf" || ext === "docx" || ext === "txt" || ext === "md" || ext === "json";
         if (!supported) { toast.error(`${f.name}: unsupported type`); continue; }
         if (f.size > 20 * 1024 * 1024) { toast.error(`${f.name}: file too large (>20MB)`); continue; }
         const result = await ingestFile({ data: { chatbotId: botId, file: f } });
@@ -200,8 +205,8 @@ function KnowledgeTab({ botId }: { botId: string }) {
       <div className="space-y-4">
         <div className="rounded-xl border border-border bg-gradient-card p-5">
           <div className="flex items-center gap-2 mb-3"><Upload className="h-4 w-4 text-primary" /><h3 className="font-semibold">Upload files</h3></div>
-          <p className="text-xs text-muted-foreground mb-3">PDF, DOCX, TXT, MD. Max 20MB each.</p>
-          <input ref={fileRef} type="file" multiple accept=".pdf,.docx,.txt,.md" onChange={(e) => handleFiles(e.target.files)} className="block w-full text-sm text-muted-foreground file:mr-3 file:rounded-md file:border-0 file:bg-accent file:px-3 file:py-2 file:text-sm file:font-medium file:text-accent-foreground hover:file:bg-accent/80 file:cursor-pointer" disabled={busy} />
+          <p className="text-xs text-muted-foreground mb-3">PDF, DOCX, TXT, MD, JSON. Max 20MB each.</p>
+          <input ref={fileRef} type="file" multiple accept=".pdf,.docx,.txt,.md,.json,application/json" onChange={(e) => handleFiles(e.target.files)} className="block w-full text-sm text-muted-foreground file:mr-3 file:rounded-md file:border-0 file:bg-accent file:px-3 file:py-2 file:text-sm file:font-medium file:text-accent-foreground hover:file:bg-accent/80 file:cursor-pointer" disabled={busy} />
         </div>
 
         <form onSubmit={handleUrl} className="rounded-xl border border-border bg-gradient-card p-5">
@@ -669,12 +674,67 @@ function SettingsTab({ bot, onChange }: { bot: any; onChange: () => void }) {
     bubble_position: bot.bubble_position,
     tone: bot.tone,
     collect_email: bot.collect_email,
+    cta_label: bot.cta_label ?? "",
+    cta_url: bot.cta_url ?? "",
+    footer_text: bot.footer_text ?? "",
+    logo_scale: Number(bot.logo_scale ?? 100),
+    footer_logo_scales: ((bot.footer_logo_urls ?? []) as any[]).map((l) => Number(l?.scale ?? 100)),
     allowed_domains: bot.allowed_domains ?? [],
     llm_provider: typeof bot.llm_provider === "string" ? bot.llm_provider : "ollama",
     llm_model: typeof bot.llm_model === "string" ? bot.llm_model : "",
   });
   const [saving, setSaving] = useState(false);
   const [logoBusy, setLogoBusy] = useState(false);
+  const footerFileRef = useRef<HTMLInputElement>(null);
+  const [footerBusy, setFooterBusy] = useState(false);
+  const footerLogos: any[] = bot.footer_logo_urls ?? [];
+  const maxFooterLogos: number = bot.max_footer_logos ?? 3;
+  const footerLogoKey = footerLogos.map((l: any) => l?.url ?? "").join("|");
+
+  // Adding or removing a logo shifts every later index, so re-seed the sliders from the server.
+  useEffect(() => {
+    setForm((f) => ({ ...f, footer_logo_scales: footerLogos.map((l: any) => Number(l?.scale ?? 100)) }));
+  }, [footerLogoKey]);
+
+  async function handleFooterLogo(file: File | null) {
+    if (!file) return;
+    const allowed = ["image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml"];
+    if (!allowed.includes(file.type.toLowerCase())) {
+      toast.error("Use JPG, PNG, WEBP, GIF, or SVG");
+      if (footerFileRef.current) footerFileRef.current.value = "";
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error("Footer logo is too large. Max 5MB.");
+      if (footerFileRef.current) footerFileRef.current.value = "";
+      return;
+    }
+
+    setFooterBusy(true);
+    try {
+      await uploadFooterLogo({ data: { chatbotId: bot.id, file } });
+      toast.success("Footer logo added");
+      onChange();
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setFooterBusy(false);
+      if (footerFileRef.current) footerFileRef.current.value = "";
+    }
+  }
+
+  async function removeFooterLogo(index: number) {
+    setFooterBusy(true);
+    try {
+      await deleteFooterLogo({ data: { chatbotId: bot.id, index } });
+      toast.success("Footer logo removed");
+      onChange();
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setFooterBusy(false);
+    }
+  }
 
   async function save() {
     setSaving(true);
@@ -756,6 +816,85 @@ function SettingsTab({ bot, onChange }: { bot: any; onChange: () => void }) {
           <Textarea rows={4} value={form.system_prompt} onChange={(e) => setForm({ ...form, system_prompt: e.target.value })} />
           <p className="text-xs text-muted-foreground">Defines the bot's persona and behavior.</p>
         </div>
+        <div className="grid sm:grid-cols-2 gap-4">
+          <div className="space-y-1.5">
+            <Label>Link button label</Label>
+            <Input placeholder="Visit our website" maxLength={40} value={form.cta_label} onChange={(e) => setForm({ ...form, cta_label: e.target.value })} />
+          </div>
+          <div className="space-y-1.5">
+            <Label>Link button URL</Label>
+            <Input type="url" placeholder="https://sp.butuan.gov.ph/contact" value={form.cta_url} onChange={(e) => setForm({ ...form, cta_url: e.target.value })} />
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground">Shown as a button above the chat input. Leave the URL empty to hide it.</p>
+
+        <div className="space-y-1.5 pt-2">
+          <Label>Footer text</Label>
+          <Input
+            placeholder="Powered by Helix"
+            maxLength={80}
+            value={form.footer_text}
+            onChange={(e) => setForm({ ...form, footer_text: e.target.value })}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label>Footer logos</Label>
+          <div className="flex flex-wrap items-center gap-3">
+            {footerLogos.map((logo: any, index: number) => {
+              const scale = form.footer_logo_scales[index] ?? 100;
+              return (
+                <div key={logo.url ?? index} className="relative group rounded-lg border border-border bg-background/70 px-3 py-2 w-[132px]">
+                  <div className="h-8 flex items-center justify-center overflow-hidden">
+                    <img
+                      src={logo.url}
+                      alt={logo.original_name || `Footer logo ${index + 1}`}
+                      className="w-auto max-w-full object-contain transition-[height]"
+                      style={{ height: `${Math.round(16 * (scale / 100))}px` }}
+                    />
+                  </div>
+                  <Slider
+                    className="mt-2"
+                    min={50}
+                    max={200}
+                    step={5}
+                    value={[scale]}
+                    onValueChange={([v]) => {
+                      const next = [...form.footer_logo_scales];
+                      next[index] = v;
+                      setForm({ ...form, footer_logo_scales: next });
+                    }}
+                    aria-label={`Size of footer logo ${index + 1}`}
+                  />
+                  <div className="mt-1 text-[10px] text-center tabular-nums text-muted-foreground">{scale}%</div>
+                  <button
+                    type="button"
+                    onClick={() => removeFooterLogo(index)}
+                    disabled={footerBusy}
+                    className="absolute -right-2 -top-2 h-5 w-5 rounded-full bg-destructive text-destructive-foreground text-xs leading-none opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity disabled:opacity-50"
+                    aria-label={`Remove footer logo ${index + 1}`}
+                  >
+                    ×
+                  </button>
+                </div>
+              );
+            })}
+            {footerLogos.length < maxFooterLogos && (
+              <Button type="button" variant="outline" size="sm" disabled={footerBusy} onClick={() => footerFileRef.current?.click()}>
+                {footerBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <><ImageIcon className="h-4 w-4 mr-2" /> Add logo</>}
+              </Button>
+            )}
+          </div>
+          <input
+            ref={footerFileRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp,image/gif,image/svg+xml"
+            className="hidden"
+            onChange={(e) => handleFooterLogo(e.target.files?.[0] ?? null)}
+          />
+          <p className="text-xs text-muted-foreground">
+            Shown at the bottom of the widget, next to the footer text. Up to {maxFooterLogos} logos, 5MB each. Use each slider to match their visual sizes, then press Save. Leave the text empty to show logos only.
+          </p>
+        </div>
       </div>
 
       <div className="rounded-xl border border-border bg-gradient-card p-6 space-y-4">
@@ -764,7 +903,7 @@ function SettingsTab({ bot, onChange }: { bot: any; onChange: () => void }) {
           <div className="flex items-start gap-4">
             <div className="flex flex-col items-center gap-3 shrink-0">
               <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Bubble</div>
-              <BotAvatar bot={bot} className="h-16 w-16 rounded-2xl shadow-glow" iconClassName="h-8 w-8" />
+              <BotAvatar bot={bot} scale={form.logo_scale} className="h-16 w-16 rounded-2xl shadow-glow" iconClassName="h-8 w-8" />
               {bot.logo_url && (
                 <>
                   <div className="text-[11px] uppercase tracking-wider text-muted-foreground">Raw file</div>
@@ -802,6 +941,37 @@ function SettingsTab({ bot, onChange }: { bot: any; onChange: () => void }) {
                   </Button>
                 )}
               </div>
+
+              {bot.logo_url && (
+                <div className="space-y-2 pt-1">
+                  <div className="flex items-center justify-between">
+                    <Label htmlFor="logo-scale">Logo size</Label>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs tabular-nums text-muted-foreground w-12 text-right">{form.logo_scale}%</span>
+                      {form.logo_scale !== 100 && (
+                        <button
+                          type="button"
+                          onClick={() => setForm({ ...form, logo_scale: 100 })}
+                          className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
+                        >
+                          Reset
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <Slider
+                    id="logo-scale"
+                    min={50}
+                    max={200}
+                    step={5}
+                    value={[form.logo_scale]}
+                    onValueChange={([v]) => setForm({ ...form, logo_scale: v })}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Zooms the logo inside the chat bubble. The bubble preview updates as you drag; press Save to apply it to the widget.
+                  </p>
+                </div>
+              )}
             </div>
           </div>
         </div>

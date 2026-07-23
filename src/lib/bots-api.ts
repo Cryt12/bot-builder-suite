@@ -57,6 +57,24 @@ export async function deleteBotLogo({ data }: FnArgs<{ chatbotId: string }>) {
   });
 }
 
+export async function uploadFooterLogo({ data }: FnArgs<{ chatbotId: string; file: File }>) {
+  const body = new FormData();
+  body.set("file", data.file);
+
+  return laravelRequest<{ bot: any }>(`/chatbots/${data.chatbotId}/footer-logos`, {
+    method: "POST",
+    token: token(),
+    body,
+  });
+}
+
+export async function deleteFooterLogo({ data }: FnArgs<{ chatbotId: string; index: number }>) {
+  return laravelRequest<{ bot: any }>(`/chatbots/${data.chatbotId}/footer-logos/${data.index}`, {
+    method: "DELETE",
+    token: token(),
+  });
+}
+
 export async function listSources({ data }: FnArgs<{ chatbotId: string }>) {
   return laravelRequest<{ sources: any[] }>(`/chatbots/${data.chatbotId}/sources`, { token: token() });
 }

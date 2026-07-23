@@ -22,6 +22,19 @@ use Symfony\Component\Process\Process;
 
 class ChatbotController extends Controller
 {
+    /** Nesting levels of a JSON document that may still be split into separate records. */
+    private const JSON_SPLIT_MAX_DEPTH = 3;
+
+    /** Nesting levels flattened inside a single record before falling back to raw JSON. */
+    private const JSON_MAX_DEPTH = 8;
+
+    private const JSON_MAX_SEGMENTS = 5000;
+
+    private const JSON_MAX_LINES_PER_SEGMENT = 400;
+
+    /** Footer logos a bot may show next to its footer text. */
+    private const MAX_FOOTER_LOGOS = 3;
+
     public function dashboardAnalytics(Request $request): JsonResponse
     {
         $user = $request->attributes->get('auth_user');
@@ -170,6 +183,12 @@ class ChatbotController extends Controller
             'tone' => ['sometimes', Rule::in(['friendly', 'formal', 'playful', 'concise'])],
             'language' => ['sometimes', 'string', 'max:16'],
             'collect_email' => ['sometimes', 'boolean'],
+            'cta_label' => ['sometimes', 'nullable', 'string', 'max:40'],
+            'cta_url' => ['sometimes', 'nullable', 'string', 'max:2048'],
+            'footer_text' => ['sometimes', 'nullable', 'string', 'max:80'],
+            'logo_scale' => ['sometimes', 'integer', 'min:50', 'max:200'],
+            'footer_logo_scales' => ['sometimes', 'array', 'max:' . self::MAX_FOOTER_LOGOS],
+            'footer_logo_scales.*' => ['integer', 'min:50', 'max:200'],
             'allowed_domains' => ['sometimes', 'array', 'min:1', 'max:20'],
             'allowed_domains.*' => ['required', 'string', 'max:253'],
             'public_rate_limit_per_minute' => ['sometimes', 'integer', 'min:0', 'max:10000'],
@@ -195,6 +214,36 @@ class ChatbotController extends Controller
 
         if (! Chatbot::supportsWidgetCacheMinutes()) {
             unset($data['widget_cache_minutes']);
+        }
+
+        if (! Chatbot::supportsLogoScale()) {
+            unset($data['logo_scale']);
+        }
+
+        if (Chatbot::supportsFooterBranding() && array_key_exists('footer_logo_scales', $data)) {
+            $scales = array_values((array) $data['footer_logo_scales']);
+            $logos = $this->footerLogoList($chatbot);
+
+            foreach ($logos as $position => $logo) {
+                $logos[$position]['scale'] = $this->normalizeLogoScale($scales[$position] ?? ($logo['scale'] ?? null));
+            }
+
+            $data['footer_logos'] = array_values($logos);
+        }
+
+        unset($data['footer_logo_scales']);
+
+        if (! Chatbot::supportsFooterBranding()) {
+            unset($data['footer_text'], $data['footer_logos']);
+        } elseif (array_key_exists('footer_text', $data)) {
+            $footerText = trim((string) $data['footer_text']);
+            $data['footer_text'] = $footerText === '' ? null : $footerText;
+        }
+
+        if (Chatbot::supportsCtaLink()) {
+            $data = $this->normalizeCtaLink($data, $chatbot);
+        } else {
+            unset($data['cta_label'], $data['cta_url']);
         }
 
         if (! empty($data['regenerate_public_key']) && Chatbot::supportsPublicKey()) {
@@ -297,6 +346,104 @@ class ChatbotController extends Controller
         return $this->json(['bot' => $this->serializeBot($request, $chatbot->fresh())]);
     }
 
+    public function uploadFooterLogo(Request $request, Chatbot $chatbot): JsonResponse
+    {
+        $this->authorizeOwner($request, $chatbot);
+
+        if (! Chatbot::supportsFooterBranding()) {
+            return $this->json([
+                'message' => 'Footer branding is not available until the latest database migration is applied.',
+            ], 503);
+        }
+
+        $data = $request->validate([
+            'file' => ['required', 'file', 'max:5120', 'mimetypes:image/jpeg,image/png,image/gif,image/webp,image/svg+xml'],
+        ]);
+
+        $logos = $this->footerLogoList($chatbot);
+
+        abort_if(
+            count($logos) >= self::MAX_FOOTER_LOGOS,
+            422,
+            'You can add up to ' . self::MAX_FOOTER_LOGOS . ' footer logos. Remove one first.',
+        );
+
+        $file = $data['file'];
+        $extension = strtolower($file->getClientOriginalExtension() ?: $file->guessExtension() ?: 'png');
+        $safeName = Str::slug(pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME)) ?: 'footer-logo';
+        $storedName = $safeName . '-' . Str::random(8) . '.' . $extension;
+        $path = $file->storeAs("bot-logos/{$chatbot->user_id}/{$chatbot->id}/footer", $storedName, 'public');
+
+        $logos[] = [
+            'path' => $path,
+            'original_name' => $file->getClientOriginalName(),
+        ];
+
+        try {
+            $chatbot->update(['footer_logos' => array_values($logos)]);
+        } catch (\Throwable $e) {
+            if (Storage::disk('public')->exists($path)) {
+                Storage::disk('public')->delete($path);
+            }
+
+            throw $e;
+        }
+
+        return $this->json(['bot' => $this->serializeBot($request, $chatbot->fresh())]);
+    }
+
+    public function deleteFooterLogo(Request $request, Chatbot $chatbot, string $index): JsonResponse
+    {
+        $this->authorizeOwner($request, $chatbot);
+
+        if (! Chatbot::supportsFooterBranding()) {
+            return $this->json([
+                'message' => 'Footer branding is not available until the latest database migration is applied.',
+            ], 503);
+        }
+
+        $logos = $this->footerLogoList($chatbot);
+        $position = (int) $index;
+
+        abort_unless(array_key_exists($position, $logos), 404, 'Footer logo not found.');
+
+        $removed = $logos[$position];
+        unset($logos[$position]);
+
+        $chatbot->update(['footer_logos' => array_values($logos)]);
+        $this->deletePublicFile((string) ($removed['path'] ?? ''));
+
+        return $this->json(['bot' => $this->serializeBot($request, $chatbot->fresh())]);
+    }
+
+    private function normalizeLogoScale(mixed $value): int
+    {
+        $scale = (int) ($value ?? 100);
+
+        return max(50, min(200, $scale ?: 100));
+    }
+
+    /**
+     * Stored footer logos, tolerating rows written before this feature or hand-edited JSON.
+     */
+    private function footerLogoList(Chatbot $chatbot): array
+    {
+        if (! Chatbot::supportsFooterBranding()) {
+            return [];
+        }
+
+        $logos = $chatbot->footer_logos;
+
+        if (! is_array($logos)) {
+            return [];
+        }
+
+        return array_values(array_filter(
+            $logos,
+            static fn ($logo) => is_array($logo) && trim((string) ($logo['path'] ?? '')) !== '',
+        ));
+    }
+
     public function sources(Request $request, Chatbot $chatbot): JsonResponse
     {
         $this->authorizeOwner($request, $chatbot);
@@ -357,14 +504,18 @@ class ChatbotController extends Controller
         $file = $data['file'];
         $extension = strtolower($file->getClientOriginalExtension());
 
-        abort_unless(in_array($extension, ['pdf', 'docx', 'txt', 'md'], true), 422, 'Unsupported file type.');
+        abort_unless(in_array($extension, ['pdf', 'docx', 'txt', 'md', 'json'], true), 422, 'Unsupported file type.');
 
         $safeName = Str::slug(pathinfo($file->getClientOriginalName(), PATHINFO_FILENAME)) ?: 'document';
         $storedName = $safeName . '-' . Str::random(8) . '.' . $extension;
         $storagePath = $file->storeAs("knowledge/{$chatbot->user_id}/{$chatbot->id}", $storedName);
         $absolutePath = Storage::path($storagePath);
 
-        $text = $this->extractFileText($absolutePath, $extension);
+        // JSON is split record-by-record so a chunk never straddles two records.
+        $segments = $extension === 'json' ? $this->jsonSegments($absolutePath) : null;
+        $text = $segments !== null
+            ? implode("\n\n", $segments)
+            : $this->extractFileText($absolutePath, $extension);
         abort_unless(strlen(trim($text)) >= 20, 422, 'No extractable text found.');
 
         return $this->json($this->storeKnowledge(
@@ -375,6 +526,7 @@ class ChatbotController extends Controller
             null,
             $storagePath,
             $file->getSize(),
+            $segments,
         ));
     }
 
@@ -530,6 +682,45 @@ class ChatbotController extends Controller
         return $host === '' ? null : $host;
     }
 
+    /**
+     * Clean up the widget's call-to-action link. Only http(s) is allowed — the widget renders
+     * this as an anchor on a third-party page, so a javascript:/data: URL must never be stored.
+     */
+    private function normalizeCtaLink(array $data, Chatbot $chatbot): array
+    {
+        if (! array_key_exists('cta_url', $data) && ! array_key_exists('cta_label', $data)) {
+            return $data;
+        }
+
+        $url = trim((string) ($data['cta_url'] ?? $chatbot->cta_url ?? ''));
+        $label = trim((string) ($data['cta_label'] ?? $chatbot->cta_label ?? ''));
+
+        if ($url === '') {
+            $data['cta_url'] = null;
+            $data['cta_label'] = null;
+
+            return $data;
+        }
+
+        if (! preg_match('#^[a-z][a-z0-9+.\-]*:#i', $url)) {
+            $url = 'https://' . ltrim($url, '/');
+        }
+
+        $parts = parse_url($url);
+        $scheme = strtolower((string) ($parts['scheme'] ?? ''));
+
+        abort_unless(
+            in_array($scheme, ['http', 'https'], true) && ! empty($parts['host']),
+            422,
+            'Enter a valid link starting with http:// or https://',
+        );
+
+        $data['cta_url'] = $url;
+        $data['cta_label'] = $label !== '' ? $label : Str::limit((string) $parts['host'], 37);
+
+        return $data;
+    }
+
     private function storeKnowledge(
         Chatbot $chatbot,
         string $type,
@@ -538,6 +729,7 @@ class ChatbotController extends Controller
         ?string $url = null,
         ?string $storagePath = null,
         ?int $sizeBytes = null,
+        ?array $segments = null,
     ): array
     {
         $name = $this->sanitizeUtf8($name);
@@ -557,7 +749,7 @@ class ChatbotController extends Controller
         ]);
 
         try {
-            $chunks = $this->chunkText($text);
+            $chunks = $segments !== null ? $this->chunkSegments($segments) : $this->chunkText($text);
             abort_if(count($chunks) === 0, 422, 'No extractable text found.');
 
             foreach ($chunks as $index => $chunk) {
@@ -621,6 +813,282 @@ class ChatbotController extends Controller
         return $chunks;
     }
 
+    /**
+     * Pack already-segmented records (e.g. JSON entries) into chunks without splitting a record.
+     * Records larger than a chunk fall back to plain text chunking.
+     */
+    private function chunkSegments(array $segments, int $size = 1000): array
+    {
+        $chunks = [];
+        $buffer = '';
+
+        foreach ($segments as $segment) {
+            $segment = trim($this->sanitizeUtf8(is_string($segment) ? $segment : (string) json_encode($segment)));
+
+            if ($segment === '') {
+                continue;
+            }
+
+            if (strlen($segment) > $size) {
+                if ($buffer !== '') {
+                    $chunks[] = $buffer;
+                    $buffer = '';
+                }
+
+                foreach ($this->chunkText($segment) as $part) {
+                    $chunks[] = $part;
+                }
+
+                continue;
+            }
+
+            if ($buffer !== '' && strlen($buffer) + strlen($segment) + 2 > $size) {
+                $chunks[] = $buffer;
+                $buffer = '';
+            }
+
+            $buffer = $buffer === '' ? $segment : $buffer . "\n\n" . $segment;
+        }
+
+        if ($buffer !== '') {
+            $chunks[] = $buffer;
+        }
+
+        return array_values(array_filter($chunks, static fn (string $chunk) => strlen($chunk) > 20));
+    }
+
+    /**
+     * Turn a JSON (or JSON Lines) file into readable "key: value" records, one segment per record.
+     */
+    private function jsonSegments(string $path): array
+    {
+        $raw = file_get_contents($path);
+        abort_if($raw === false, 422, 'Could not read JSON file.');
+
+        $raw = ltrim($this->sanitizeUtf8($raw), "\u{FEFF}");
+        abort_if(trim($raw) === '', 422, 'No extractable text found.');
+
+        $decoded = json_decode($raw, true);
+
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            $decoded = $this->decodeJsonLines($raw);
+            abort_if($decoded === null, 422, 'Invalid JSON file.');
+        }
+
+        $segments = [];
+        $this->collectJsonSegments($decoded, '', $segments);
+
+        abort_if($segments === [], 422, 'No extractable text found.');
+
+        return $segments;
+    }
+
+    /**
+     * Support newline-delimited JSON (one object per line) uploaded with a .json extension.
+     */
+    private function decodeJsonLines(string $raw): ?array
+    {
+        $rows = [];
+
+        foreach (preg_split('/\R/u', $raw) ?: [] as $line) {
+            $line = trim($line);
+
+            if ($line === '') {
+                continue;
+            }
+
+            $decoded = json_decode($line, true);
+
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                return null;
+            }
+
+            $rows[] = $decoded;
+        }
+
+        return $rows === [] ? null : $rows;
+    }
+
+    private function collectJsonSegments(mixed $value, string $path, array &$segments, int $depth = 0): void
+    {
+        if (count($segments) >= self::JSON_MAX_SEGMENTS) {
+            return;
+        }
+
+        if (is_array($value) && $value !== [] && $depth < self::JSON_SPLIT_MAX_DEPTH) {
+            if (array_is_list($value)) {
+                if ($this->isJsonRecordList($value)) {
+                    foreach ($value as $index => $item) {
+                        $this->collectJsonSegments($item, $path . '[' . $index . ']', $segments, $depth + 1);
+                    }
+
+                    return;
+                }
+            } else {
+                $inline = [];
+                $groups = [];
+
+                foreach ($value as $key => $item) {
+                    $childPath = $path === '' ? (string) $key : $path . '.' . $key;
+
+                    if ($this->isJsonRecordList($item)) {
+                        $groups[$childPath] = $item;
+                    } else {
+                        $inline[$key] = $item;
+                    }
+                }
+
+                if ($groups !== []) {
+                    if ($inline !== []) {
+                        $this->pushJsonSegment($path, $inline, $segments);
+                    }
+
+                    foreach ($groups as $childPath => $item) {
+                        $this->collectJsonSegments($item, $childPath, $segments, $depth + 1);
+                    }
+
+                    return;
+                }
+            }
+        }
+
+        $this->pushJsonSegment($path, $value, $segments);
+    }
+
+    /**
+     * A list worth splitting into one segment per element (i.e. a list of records, not of scalars).
+     */
+    private function isJsonRecordList(mixed $value): bool
+    {
+        if (! is_array($value) || $value === [] || ! array_is_list($value)) {
+            return false;
+        }
+
+        foreach ($value as $item) {
+            if (is_array($item) && $item !== []) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function pushJsonSegment(string $path, mixed $value, array &$segments): void
+    {
+        $lines = [];
+        $this->flattenJsonValue($value, '', $lines);
+
+        if ($lines === []) {
+            return;
+        }
+
+        $header = $this->jsonSegmentHeader($path);
+        $segments[] = trim(($header !== '' ? $header . "\n" : '') . implode("\n", $lines));
+    }
+
+    /**
+     * "faqs[2].details" => "[faqs item 3 > details]" so a chunk carries its own context.
+     */
+    private function jsonSegmentHeader(string $path): string
+    {
+        if ($path === '') {
+            return '';
+        }
+
+        $label = preg_replace_callback(
+            '/\[(\d+)\]/',
+            static fn (array $m) => ' item ' . ((int) $m[1] + 1),
+            $path,
+        ) ?? $path;
+
+        $label = str_replace(['_', '-', '.'], [' ', ' ', ' > '], $label);
+        $label = trim(preg_replace('/\s+/u', ' ', $label) ?? $label);
+
+        return $label === '' ? '' : '[' . $label . ']';
+    }
+
+    private function flattenJsonValue(mixed $value, string $prefix, array &$lines, int $depth = 0): void
+    {
+        if ($value === null || $value === '' || $value === []) {
+            return;
+        }
+
+        if (count($lines) >= self::JSON_MAX_LINES_PER_SEGMENT) {
+            return;
+        }
+
+        if (is_array($value)) {
+            if ($depth >= self::JSON_MAX_DEPTH) {
+                $this->pushJsonLine($prefix, (string) json_encode($value, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE), $lines);
+
+                return;
+            }
+
+            if (array_is_list($value)) {
+                $scalars = array_filter($value, static fn ($item) => ! is_array($item));
+
+                if (count($scalars) === count($value)) {
+                    $this->pushJsonLine(
+                        $prefix,
+                        implode(', ', array_map(fn ($item) => $this->jsonScalarToString($item), $value)),
+                        $lines,
+                    );
+
+                    return;
+                }
+
+                foreach ($value as $index => $item) {
+                    $this->flattenJsonValue(
+                        $item,
+                        $prefix === '' ? 'item ' . ($index + 1) : $prefix . ' ' . ($index + 1),
+                        $lines,
+                        $depth + 1,
+                    );
+                }
+
+                return;
+            }
+
+            foreach ($value as $key => $item) {
+                $label = trim(str_replace(['_', '-'], ' ', (string) $key));
+                $this->flattenJsonValue(
+                    $item,
+                    $prefix === '' ? $label : $prefix . ' > ' . $label,
+                    $lines,
+                    $depth + 1,
+                );
+            }
+
+            return;
+        }
+
+        $this->pushJsonLine($prefix, $this->jsonScalarToString($value), $lines);
+    }
+
+    private function pushJsonLine(string $prefix, string $value, array &$lines): void
+    {
+        $value = $this->normalizeImportedText($value);
+
+        if ($value === '') {
+            return;
+        }
+
+        $lines[] = $prefix === '' ? $value : $prefix . ': ' . $value;
+    }
+
+    private function jsonScalarToString(mixed $value): string
+    {
+        if (is_bool($value)) {
+            return $value ? 'true' : 'false';
+        }
+
+        if ($value === null) {
+            return '';
+        }
+
+        return (string) $value;
+    }
+
     private function sanitizeUtf8(?string $value): string
     {
         $value = (string) ($value ?? '');
@@ -660,6 +1128,7 @@ class ChatbotController extends Controller
             'txt', 'md' => file_get_contents($path) ?: '',
             'pdf' => $this->extractPdfText($path),
             'docx' => $this->extractDocxText($path),
+            'json' => implode("\n\n", $this->jsonSegments($path)),
             default => '',
         };
     }
@@ -712,6 +1181,14 @@ class ChatbotController extends Controller
         $data['logo_url'] = Chatbot::supportsLogoUpload()
             ? $this->resolvePublicFileUrl($request, $bot->logo_path)
             : null;
+        $data['footer_logo_urls'] = collect($this->footerLogoList($bot))
+            ->map(fn (array $logo) => [
+                'url' => $this->resolvePublicFileUrl($request, (string) $logo['path']),
+                'original_name' => $logo['original_name'] ?? null,
+                'scale' => $this->normalizeLogoScale($logo['scale'] ?? null),
+            ])
+            ->all();
+        $data['max_footer_logos'] = self::MAX_FOOTER_LOGOS;
         $data['owner'] = $bot->relationLoaded('user') && $bot->user
             ? [
                 'id' => $bot->user->id,

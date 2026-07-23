@@ -19,6 +19,9 @@ class Chatbot extends Model
     private static ?bool $hasPublicRateLimitColumn = null;
     private static ?bool $hasWidgetCacheMinutesColumn = null;
     private static ?bool $hasLogoColumns = null;
+    private static ?bool $hasCtaColumns = null;
+    private static ?bool $hasFooterColumns = null;
+    private static ?bool $hasLogoScaleColumn = null;
 
     protected $fillable = [
         'user_id',
@@ -28,10 +31,15 @@ class Chatbot extends Model
         'primary_color',
         'logo_path',
         'logo_original_name',
+        'logo_scale',
         'bubble_position',
         'tone',
         'language',
         'collect_email',
+        'cta_label',
+        'cta_url',
+        'footer_text',
+        'footer_logos',
         'api_key',
         'public_key',
         'allowed_domains',
@@ -47,6 +55,8 @@ class Chatbot extends Model
         return [
             'collect_email' => 'boolean',
             'allowed_domains' => 'array',
+            'footer_logos' => 'array',
+            'logo_scale' => 'integer',
             'public_rate_limit_per_minute' => 'integer',
             'widget_cache_minutes' => 'integer',
             'is_active' => 'boolean',
@@ -99,6 +109,31 @@ class Chatbot extends Model
 
         return self::$hasLogoColumns = Schema::hasColumn('chatbots', 'logo_path')
             && Schema::hasColumn('chatbots', 'logo_original_name');
+    }
+
+    public static function supportsCtaLink(): bool
+    {
+        if (self::$hasCtaColumns !== null) {
+            return self::$hasCtaColumns;
+        }
+
+        return self::$hasCtaColumns = Schema::hasColumn('chatbots', 'cta_label')
+            && Schema::hasColumn('chatbots', 'cta_url');
+    }
+
+    public static function supportsLogoScale(): bool
+    {
+        return self::$hasLogoScaleColumn ??= Schema::hasColumn('chatbots', 'logo_scale');
+    }
+
+    public static function supportsFooterBranding(): bool
+    {
+        if (self::$hasFooterColumns !== null) {
+            return self::$hasFooterColumns;
+        }
+
+        return self::$hasFooterColumns = Schema::hasColumn('chatbots', 'footer_text')
+            && Schema::hasColumn('chatbots', 'footer_logos');
     }
 
     public function user(): BelongsTo
