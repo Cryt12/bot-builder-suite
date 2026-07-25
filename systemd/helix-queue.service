@@ -1,0 +1,19 @@
+[Unit]
+Description=Helix Bot Builder Queue Worker (knowledge embedding)
+After=network.target
+
+[Service]
+Type=simple
+User=talinoserver2
+WorkingDirectory=/home/talinoserver2/Documents/bot-builder-suite/laravel-backend
+# --timeout must stay above EmbedKnowledgeSource::$timeout (3600) or long sources
+# get killed mid-run. --max-time recycles the worker hourly so a leaked embedding
+# response can never accumulate across days.
+ExecStart=/usr/bin/php artisan queue:work --queue=default --sleep=3 --tries=3 --timeout=3660 --max-time=3600
+Restart=always
+RestartSec=10
+StandardOutput=append:/home/talinoserver2/Documents/bot-builder-suite/logs/queue.log
+StandardError=append:/home/talinoserver2/Documents/bot-builder-suite/logs/queue.error.log
+
+[Install]
+WantedBy=multi-user.target

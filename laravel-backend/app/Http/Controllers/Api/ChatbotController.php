@@ -3,12 +3,12 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Jobs\EmbedKnowledgeSource;
 use App\Models\Chatbot;
 use App\Models\Conversation;
 use App\Models\DocumentChunk;
 use App\Models\KnowledgeSource;
 use App\Models\Message;
-use App\Support\OllamaEmbeddings;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
@@ -752,23 +752,37 @@ class ChatbotController extends Controller
             $chunks = $segments !== null ? $this->chunkSegments($segments) : $this->chunkText($text);
             abort_if(count($chunks) === 0, 422, 'No extractable text found.');
 
-            foreach ($chunks as $index => $chunk) {
-                $content = $this->sanitizeUtf8($chunk);
-                $embedding = OllamaEmbeddings::embed($content);
+            $now = now();
 
-                DocumentChunk::create([
-                    'source_id' => $source->id,
-                    'chatbot_id' => $chatbot->id,
-                    'user_id' => $chatbot->user_id,
-                    'content' => $content,
-                    'chunk_index' => $index,
-                    'embedding' => $embedding ? OllamaEmbeddings::toPgVector($embedding) : null,
-                ]);
+            // Written vector-free and in bulk so the upload returns immediately; the
+            // embedding pass is the slow part and it runs on the queue instead.
+            foreach (array_chunk($chunks, 500, true) as $batch) {
+                $rows = [];
+
+                foreach ($batch as $index => $chunk) {
+                    $rows[] = [
+                        'id' => (string) Str::uuid(),
+                        'source_id' => $source->id,
+                        'chatbot_id' => $chatbot->id,
+                        'user_id' => $chatbot->user_id,
+                        'content' => $this->sanitizeUtf8($chunk),
+                        'chunk_index' => $index,
+                        'embedding' => null,
+                        'embedding_recipe' => null,
+                        'created_at' => $now,
+                    ];
+                }
+
+                DocumentChunk::insert($rows);
             }
 
-            $source->update(['status' => 'ready', 'chunk_count' => count($chunks)]);
+            $source->update(['chunk_count' => count($chunks)]);
 
-            return ['sourceId' => $source->id, 'chunks' => count($chunks)];
+            // Stays "processing" -- and so stays out of retrieval -- until the job
+            // finishes and flips it to "ready".
+            EmbedKnowledgeSource::dispatch($source->id);
+
+            return ['sourceId' => $source->id, 'chunks' => count($chunks), 'status' => 'processing'];
         } catch (\Throwable $e) {
             $source->update([
                 'status' => 'error',

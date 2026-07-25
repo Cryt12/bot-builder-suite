@@ -97,6 +97,10 @@ return [
             'prefix_indexes' => true,
             'search_path' => 'public',
             'sslmode' => env('DB_SSLMODE', 'prefer'),
+            // The server's Postgres session defaults to Asia/Manila. Laravel writes naive
+            // UTC strings, so without this the database read them as +08 and stored every
+            // timestamp 8 hours in the past.
+            'timezone' => env('DB_TIMEZONE', 'UTC'),
         ],
 
         'sqlsrv' => [

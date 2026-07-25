@@ -21,6 +21,7 @@ class DocumentChunk extends Model
         'content',
         'chunk_index',
         'embedding',
+        'embedding_recipe',
     ];
 
     protected function casts(): array

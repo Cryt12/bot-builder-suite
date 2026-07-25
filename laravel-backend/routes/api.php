@@ -25,6 +25,7 @@ Route::get('/public/bot/{apiKey}', [PublicChatController::class, 'bot']);
 Route::get('/public/logo/{apiKey}', [PublicChatController::class, 'logo']);
 Route::get('/public/footer-logo/{apiKey}/{index}', [PublicChatController::class, 'footerLogo']);
 Route::post('/public/chat', [PublicChatController::class, 'chat']);
+Route::post('/public/chat/stream', [PublicChatController::class, 'chatStream']);
 
 Route::middleware(BearerTokenAuth::class)->group(function () {
     Route::get('/auth/me', [AuthController::class, 'me']);

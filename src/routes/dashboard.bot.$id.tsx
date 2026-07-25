@@ -96,6 +96,25 @@ function BotDetail() {
   );
 }
 
+const PH_TIME_ZONE = "Asia/Manila";
+
+function formatPhTime(value: string | null | undefined) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+
+  return date.toLocaleString("en-PH", {
+    timeZone: PH_TIME_ZONE,
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  });
+}
+
 function BotAvatar({
   bot,
   className = "h-12 w-12 rounded-xl",
@@ -139,13 +158,22 @@ function KnowledgeTab({ botId }: { botId: string }) {
   const [textName, setTextName] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
 
-  async function refresh() {
-    setLoading(true);
+  async function refresh(quiet = false) {
+    if (!quiet) setLoading(true);
     try { setSources((await listSources({ data: { chatbotId: botId } })).sources ?? []); }
-    catch (e: any) { toast.error(e.message); }
-    finally { setLoading(false); }
+    catch (e: any) { if (!quiet) toast.error(e.message); }
+    finally { if (!quiet) setLoading(false); }
   }
   useEffect(() => { refresh(); }, [botId]);
+
+  // Embedding runs on the queue now, so a new source lands as "processing" and only
+  // becomes searchable once the worker finishes. Poll until everything has settled.
+  const hasProcessing = sources.some((s) => s.status !== "ready" && s.status !== "error");
+  useEffect(() => {
+    if (!hasProcessing) return;
+    const timer = setInterval(() => refresh(true), 4000);
+    return () => clearInterval(timer);
+  }, [hasProcessing, botId]);
 
   async function handleUrl(e: React.FormEvent) {
     e.preventDefault();
@@ -178,7 +206,7 @@ function KnowledgeTab({ botId }: { botId: string }) {
         if (f.size > 20 * 1024 * 1024) { toast.error(`${f.name}: file too large (>20MB)`); continue; }
         const result = await ingestFile({ data: { chatbotId: botId, file: f } });
         const count = result.chunks === 1 ? "1 chunk" : `${result.chunks} chunks`;
-        toast.success(`Imported ${f.name} (${count})`);
+        toast.success(`Imported ${f.name} (${count}) — embedding in background`);
       }
       refresh();
     } catch (e: any) { toast.error(e.message); }
@@ -647,7 +675,7 @@ function HistoryTab({ botId }: { botId: string }) {
         {convs.map((c) => (
           <button key={c.id} onClick={() => setActive(c.id)} className={`w-full text-left px-4 py-3 border-b border-border hover:bg-accent/40 transition-colors ${active === c.id ? "bg-accent/60" : ""}`}>
             <div className="text-sm font-medium truncate">{c.visitor_email || c.visitor_id || "Anonymous"}</div>
-            <div className="text-xs text-muted-foreground mt-0.5">{new Date(c.created_at).toLocaleString()}</div>
+            <div className="text-xs text-muted-foreground mt-0.5">{formatPhTime(c.created_at)}</div>
           </button>
         ))}
       </div>

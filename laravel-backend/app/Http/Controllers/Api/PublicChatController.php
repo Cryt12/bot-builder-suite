@@ -18,6 +18,7 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class PublicChatController extends Controller
 {
@@ -57,6 +58,37 @@ class PublicChatController extends Controller
      */
     public function chat(Request $request): JsonResponse
     {
+        $bot = null;
+        $data = null;
+
+        if ($error = $this->guardPublicChat($request, $bot, $data)) {
+            return $error;
+        }
+
+        return $this->handleChat($request, $bot, $data, 'widget');
+    }
+
+    /**
+     * Streaming twin of chat(), used by the widget so the first tokens land immediately.
+     */
+    public function chatStream(Request $request): \Symfony\Component\HttpFoundation\Response
+    {
+        $bot = null;
+        $data = null;
+
+        if ($error = $this->guardPublicChat($request, $bot, $data)) {
+            return $error;
+        }
+
+        return $this->handleChatStream($request, $bot, $data, 'widget');
+    }
+
+    /**
+     * Entry guards shared by both public chat endpoints. Returns an error response,
+     * or null once $bot and $data have been populated.
+     */
+    private function guardPublicChat(Request $request, ?Chatbot &$bot, ?array &$data): ?JsonResponse
+    {
         if (! Chatbot::supportsPublicKey()) {
             return $this->json($request, [
                 'error' => 'Public chat is temporarily unavailable until the latest database migration is applied.',
@@ -75,11 +107,7 @@ class PublicChatController extends Controller
             return $this->json($request, ['error' => 'This domain is not allowed for this chatbot.'], 403);
         }
 
-        if ($limitResponse = $this->enforceRateLimit($request, $bot, $data['visitorId'] ?? null)) {
-            return $limitResponse;
-        }
-
-        return $this->handleChat($request, $bot, $data, 'widget');
+        return $this->enforceRateLimit($request, $bot, $data['visitorId'] ?? null);
     }
 
     /**
@@ -147,6 +175,116 @@ class PublicChatController extends Controller
      */
     public function handleChat(Request $request, Chatbot $bot, array $data, string $source = 'widget'): JsonResponse
     {
+        $turn = $this->prepareTurn($bot, $data, $source);
+
+        $reply = $turn['agentResponse']['reply']
+            ?? $this->generateReply($turn['system'], $turn['messages'], $bot);
+
+        $this->finishTurn($bot, $turn['conversation'], $data['message'], $reply);
+
+        return $this->json($request, [
+            'reply' => $reply,
+            'agentAction' => $turn['agentResponse']['agentAction'] ?? null,
+            'conversationId' => $turn['conversation']->id,
+            'bot' => $this->botSummary($bot),
+        ]);
+    }
+
+    /**
+     * Same turn as handleChat, delivered as Server-Sent Events.
+     *
+     * Total generation time is identical; what changes is that the visitor sees the
+     * first words almost immediately instead of waiting for the whole answer. All
+     * the slow setup (retrieval, prompt assembly) happens before the response is
+     * handed back, so once the stream opens the deltas follow straight away.
+     */
+    public function handleChatStream(Request $request, Chatbot $bot, array $data, string $source = 'widget'): StreamedResponse
+    {
+        $turn = $this->prepareTurn($bot, $data, $source);
+
+        $response = new StreamedResponse(function () use ($bot, $data, $turn) {
+            $this->disableOutputBuffering();
+
+            $this->sse('meta', [
+                'conversationId' => $turn['conversation']->id,
+                'agentAction' => $turn['agentResponse']['agentAction'] ?? null,
+                'bot' => $this->botSummary($bot),
+            ]);
+
+            $reply = '';
+            $saved = false;
+
+            // A visitor closing the widget mid-answer kills the script on the next
+            // write, so the turn is committed from a shutdown hook too. Without it
+            // the conversation keeps a user message with no reply beside it.
+            $persist = function () use ($bot, $data, $turn, &$reply, &$saved) {
+                if ($saved || trim($reply) === '') {
+                    return;
+                }
+
+                $saved = true;
+                $this->finishTurn($bot, $turn['conversation'], $data['message'], $reply);
+            };
+
+            register_shutdown_function($persist);
+
+            try {
+                if (isset($turn['agentResponse']['reply'])) {
+                    // A form-agent turn is already decided; there is nothing to stream.
+                    $reply = (string) $turn['agentResponse']['reply'];
+                    $this->sse('delta', ['text' => $reply]);
+                } else {
+                    $this->streamReply($turn['system'], $turn['messages'], $bot, function (string $delta) use (&$reply) {
+                        $reply .= $delta;
+                        $this->sse('delta', ['text' => $delta]);
+                    });
+                }
+            } catch (\Throwable $e) {
+                report($e);
+
+                // Headers are long gone by now, so a failure has to be reported in-band.
+                if ($reply === '') {
+                    $this->sse('error', ['message' => 'Sorry, I had trouble responding.']);
+                    $this->sse('done', ['reply' => '', 'conversationId' => $turn['conversation']->id]);
+
+                    return;
+                }
+            }
+
+            if (trim($reply) === '') {
+                $reply = 'Sorry, I had trouble responding.';
+                $this->sse('delta', ['text' => $reply]);
+            }
+
+            $persist();
+
+            $this->sse('done', [
+                'reply' => $reply,
+                'conversationId' => $turn['conversation']->id,
+            ]);
+        });
+
+        $response->headers->add([
+            'Content-Type' => 'text/event-stream; charset=utf-8',
+            // no-transform stops proxies from gzipping (and therefore buffering) the stream.
+            'Cache-Control' => 'no-cache, no-store, no-transform, must-revalidate',
+            'Connection' => 'keep-alive',
+            // nginx buffers proxied responses by default, which would hold every token
+            // back until the generation finished and defeat the point of streaming.
+            'X-Accel-Buffering' => 'no',
+        ] + $this->corsHeaders($request));
+
+        return $response;
+    }
+
+    /**
+     * Everything a turn needs before the model is called: the conversation, the persisted
+     * user message, the assembled prompts, and any canned form-agent reply.
+     *
+     * @return array{conversation: Conversation, system: string, messages: array, agentResponse: ?array}
+     */
+    private function prepareTurn(Chatbot $bot, array $data, string $source): array
+    {
         $conversation = $this->resolveConversation($bot, $data, $source);
 
         Message::create([
@@ -164,14 +302,19 @@ class PublicChatController extends Controller
             $data['message']
         );
 
-        $agentResponse = $this->buildFormAgentResponse($bot, $data, $pageContext);
+        return [
+            'conversation' => $conversation,
+            'system' => $this->buildSystemPrompt($bot, $pageContextText, $knowledgeContext),
+            'messages' => $this->buildChatMessages($data, $pageContext),
+            'agentResponse' => $this->buildFormAgentResponse($bot, $data, $pageContext),
+        ];
+    }
 
-        $reply = $agentResponse['reply'] ?? $this->generateReply(
-            $this->buildSystemPrompt($bot, $pageContextText, $knowledgeContext),
-            $this->buildChatMessages($data, $pageContext),
-            $bot
-        );
-
+    /**
+     * Record the assistant's side of the turn once the full reply is known.
+     */
+    private function finishTurn(Chatbot $bot, Conversation $conversation, string $userMessage, string $reply): void
+    {
         Message::create([
             'conversation_id' => $conversation->id,
             'user_id' => $bot->user_id,
@@ -179,23 +322,53 @@ class PublicChatController extends Controller
             'content' => $reply,
         ]);
 
+        $provider = $bot->llm_provider ?: config('models.llm.default_provider');
+
         AnalyticsEvent::create([
             'chatbot_id' => $bot->id,
             'user_id' => $bot->user_id,
             'event_type' => 'message',
-            'metadata' => ['length' => strlen($data['message']), 'model' => config('services.ollama.model')],
-        ]);
-
-        return $this->json($request, [
-            'reply' => $reply,
-            'agentAction' => $agentResponse['agentAction'] ?? null,
-            'conversationId' => $conversation->id,
-            'bot' => [
-                'name' => $bot->name,
-                'primaryColor' => $bot->primary_color,
-                'collectEmail' => $bot->collect_email,
+            'metadata' => [
+                'length' => mb_strlen($userMessage),
+                'model' => $bot->llm_model ?: config("models.llm.{$provider}.model"),
             ],
         ]);
+    }
+
+    private function botSummary(Chatbot $bot): array
+    {
+        return [
+            'name' => $bot->name,
+            'primaryColor' => $bot->primary_color,
+            'collectEmail' => $bot->collect_email,
+        ];
+    }
+
+    /**
+     * Write one SSE frame and push it all the way out to the client.
+     */
+    private function sse(string $event, array $payload): void
+    {
+        echo 'event: ' . $event . "\n";
+        echo 'data: ' . json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) . "\n\n";
+
+        while (ob_get_level() > 0) {
+            @ob_end_flush();
+        }
+
+        @flush();
+    }
+
+    private function disableOutputBuffering(): void
+    {
+        @ini_set('zlib.output_compression', '0');
+        @ini_set('output_buffering', '0');
+        @ini_set('implicit_flush', '1');
+        @ignore_user_abort(false);
+
+        while (ob_get_level() > 0) {
+            @ob_end_flush();
+        }
     }
 
     /**
@@ -1334,7 +1507,7 @@ class PublicChatController extends Controller
 
     private function retrieveSemanticKnowledgeMatches(Chatbot $bot, string $query): array
     {
-        $embedding = OllamaEmbeddings::embed($query);
+        $embedding = OllamaEmbeddings::embedQueryCached($query);
 
         if (! $embedding) {
             return [];
@@ -1463,10 +1636,8 @@ LIMIT 8
         $response = Http::timeout(120)->post($url, [
             'model'    => $model,
             'stream'   => false,
-            'messages' => array_merge(
-                [['role' => 'system', 'content' => $system]],
-                $messages,
-            ),
+            'keep_alive' => (string) config('models.llm.ollama.keep_alive', '30m'),
+            'messages' => $this->withSystem($system, $messages),
         ]);
 
         if (! $response->ok()) {
@@ -1474,6 +1645,158 @@ LIMIT 8
         }
 
         return $response->json('message.content') ?: 'Sorry, I had trouble responding.';
+    }
+
+    /**
+     * Stream a reply from whichever provider the bot is configured for, invoking
+     * $onDelta for each fragment of text as it arrives.
+     */
+    private function streamReply(string $system, array $messages, Chatbot $bot, callable $onDelta): void
+    {
+        $provider = $bot->llm_provider ?: config('models.llm.default_provider');
+        $model    = $bot->llm_model ?: config("models.llm.{$provider}.model");
+
+        match ($provider) {
+            'openrouter' => $this->streamOpenRouter($model, $system, $messages, $onDelta),
+            default      => $this->streamOllama($model, $system, $messages, $onDelta),
+        };
+    }
+
+    /**
+     * Ollama streams newline-delimited JSON objects, one per token.
+     */
+    private function streamOllama(string $model, string $system, array $messages, callable $onDelta): void
+    {
+        $url = rtrim(config('models.llm.ollama.url'), '/') . '/api/chat';
+
+        $response = Http::timeout(300)->withOptions(['stream' => true])->post($url, [
+            'model'    => $model,
+            'stream'   => true,
+            'keep_alive' => (string) config('models.llm.ollama.keep_alive', '30m'),
+            'messages' => $this->withSystem($system, $messages),
+        ]);
+
+        if (! $response->ok()) {
+            throw new \RuntimeException('Ollama failed: ' . $response->body());
+        }
+
+        $this->readLines($response, function (string $line) use ($onDelta): bool {
+            $payload = json_decode($line, true);
+
+            if (! is_array($payload)) {
+                return true;
+            }
+
+            $delta = (string) ($payload['message']['content'] ?? '');
+
+            if ($delta !== '') {
+                $onDelta($delta);
+            }
+
+            return empty($payload['done']);
+        });
+    }
+
+    /**
+     * OpenRouter streams OpenAI-style SSE frames.
+     */
+    private function streamOpenRouter(string $model, string $system, array $messages, callable $onDelta): void
+    {
+        $apiKey = config('models.llm.openrouter.api_key') ?: config('services.openrouter.api_key');
+
+        if (! $apiKey) {
+            throw new \RuntimeException('OpenRouter API key is not configured.');
+        }
+
+        $url = rtrim(config('models.llm.openrouter.url'), '/') . '/chat/completions';
+
+        $response = Http::timeout(300)
+            ->withOptions(['stream' => true])
+            ->withHeaders([
+                'Authorization' => "Bearer {$apiKey}",
+                'Content-Type'  => 'application/json',
+                'HTTP-Referer'  => config('app.url', 'http://localhost'),
+            ])
+            ->post($url, [
+                'model'    => $model,
+                'stream'   => true,
+                'messages' => $this->withSystem($system, $messages),
+            ]);
+
+        if (! $response->ok()) {
+            throw new \RuntimeException('OpenRouter failed: ' . $response->body());
+        }
+
+        $this->readLines($response, function (string $line) use ($onDelta): bool {
+            // Keep-alive comments and the terminator carry no content.
+            if (! str_starts_with($line, 'data:')) {
+                return true;
+            }
+
+            $json = trim(substr($line, 5));
+
+            if ($json === '' || $json === '[DONE]') {
+                return $json !== '[DONE]';
+            }
+
+            $payload = json_decode($json, true);
+
+            if (! is_array($payload)) {
+                return true;
+            }
+
+            $delta = (string) ($payload['choices'][0]['delta']['content'] ?? '');
+
+            if ($delta !== '') {
+                $onDelta($delta);
+            }
+
+            return true;
+        });
+    }
+
+    /**
+     * Pull a streamed HTTP body apart into lines, handing each to $onLine.
+     * $onLine returns false to stop reading early.
+     */
+    private function readLines(\Illuminate\Http\Client\Response $response, callable $onLine): void
+    {
+        $body = $response->toPsrResponse()->getBody();
+        $buffer = '';
+
+        while (! $body->eof()) {
+            $read = $body->read(8192);
+
+            if ($read === '') {
+                // Open but idle. Yield briefly rather than spinning the CPU on a
+                // non-blocking stream that has nothing to give yet.
+                usleep(10000);
+
+                continue;
+            }
+
+            $buffer .= $read;
+
+            while (($position = strpos($buffer, "\n")) !== false) {
+                $line = trim(substr($buffer, 0, $position));
+                $buffer = substr($buffer, $position + 1);
+
+                if ($line === '' || $onLine($line)) {
+                    continue;
+                }
+
+                return;
+            }
+        }
+
+        if (trim($buffer) !== '') {
+            $onLine(trim($buffer));
+        }
+    }
+
+    private function withSystem(string $system, array $messages): array
+    {
+        return array_merge([['role' => 'system', 'content' => $system]], $messages);
     }
 
     /**
@@ -1498,10 +1821,7 @@ LIMIT 8
             ->post($url, [
                 'model'    => $model,
                 'stream'   => false,
-                'messages' => array_merge(
-                    [['role' => 'system', 'content' => $system]],
-                    $messages,
-                ),
+                'messages' => $this->withSystem($system, $messages),
             ]);
 
         if (! $response->ok()) {
@@ -1534,7 +1854,7 @@ LIMIT 8
   var EMBED_CACHE_MINUTES = parseCacheMinutes(explicitCacheMinutes);
 
   var closeTimer = null;
-  var state = { open: false, closing: false, conversationId: null, messages: [], sending: false, bot: null, pageContext: null, formContext: null, pendingFormSubmit: null, lastPageSignature: '', pageReadLabel: 'Scanning page...', draftMessage: '', draftEmail: '', activeField: null, headerCompact: false, headerProgress: 0, headerTargetProgress: 0, headerFrame: null, ctaMini: false, panelAnimatedIn: false };
+  var state = { open: false, closing: false, conversationId: null, messages: [], sending: false, bot: null, pageContext: null, formContext: null, pendingFormSubmit: null, lastPageSignature: '', pageReadLabel: 'Scanning page...', draftMessage: '', draftEmail: '', activeField: null, headerCompact: false, headerProgress: 0, headerTargetProgress: 0, headerFrame: null, headerCopyHeight: 0, statusHeight: 0, headerCanCollapse: false, bodyScrollTop: 0, bodyAtBottom: true, ctaMini: false, panelAnimatedIn: false };
   restoreSession();
   state.ctaMini = shouldMiniCta();
 
@@ -1589,7 +1909,7 @@ LIMIT 8
     '.helix-page-status{display:inline-flex;align-items:center;gap:8px;align-self:flex-start;max-width:100%;padding:var(--helix-status-padding,10px 14px);border-radius:16px;background:rgba(255,255,255,0.92);color:#334155;font-size:12px;font-weight:600;box-shadow:0 12px 24px rgba(15,23,42,0.12);max-height:var(--helix-status-height,56px);opacity:var(--helix-status-opacity,1);transform:translateY(var(--helix-status-y,0));overflow:hidden;will-change:opacity,transform,max-height}',
     '.helix-page-status::before{content:"";width:8px;height:8px;border-radius:999px;background:currentColor;opacity:.65;flex-shrink:0}',
     '.helix-shell{flex:1;display:flex;flex-direction:column;min-height:0;background:linear-gradient(180deg,rgba(248,250,252,0.92) 0%,#ffffff 22%,#ffffff 100%)}',
-    '.helix-body{flex:1;overflow-y:auto;padding:16px 16px 12px;background:transparent;display:flex;flex-direction:column;gap:10px}',
+    '.helix-body{flex:1;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;scroll-behavior:smooth;padding:16px 16px 12px;background:transparent;display:flex;flex-direction:column;gap:10px}',
     '.helix-msg{max-width:86%;padding:13px 16px;border-radius:18px;line-height:1.6;word-wrap:break-word;text-align:left;font-size:13.5px}',
     '.helix-msg.bot{background:rgba(255,255,255,0.98);border:1px solid rgba(226,232,240,0.95);align-self:flex-start;border-top-left-radius:8px;box-shadow:0 12px 30px rgba(15,23,42,0.06)}',
     '.helix-msg.user{color:#fff;align-self:flex-end;border-top-right-radius:8px;box-shadow:0 12px 30px rgba(15,23,42,0.14)}',
@@ -2111,7 +2431,11 @@ LIMIT 8
 
     window.addEventListener('resize', function(){
       var openPanel = root.querySelector('.helix-panel');
-      if (openPanel) fitHeadline(openPanel);
+      if (!openPanel) return;
+      fitHeadline(openPanel);
+      state.headerCopyHeight = 0;
+      state.statusHeight = 0;
+      applyHeaderProgress(openPanel, state.headerProgress);
     });
     window.addEventListener('popstate', function(){ schedulePageContextRefresh(250); });
     window.addEventListener('hashchange', function(){ schedulePageContextRefresh(250); });
@@ -2343,12 +2667,47 @@ LIMIT 8
    * Scroll sets a target; the header eases toward it frame by frame so the collapse
    * never snaps or stutters, however coarse the scroll events are.
    */
+  var HEADER_COLLAPSE_DISTANCE_PX = 96;
+  var HEADER_TARGET_DEADBAND = 0.015;
+
+  /**
+   * Derived from scrollTop alone. Anything measured from the body (clientHeight, maxScroll)
+   * is changed BY the collapse, so feeding it back in makes the header oscillate.
+   */
+  /**
+   * Collapsing frees ~113px of body height. If the conversation is barely taller than the
+   * viewport, that extra space removes the scrollbar, the browser clamps scrollTop, and the
+   * header bounces back open. Decide once per render whether there is enough content to
+   * collapse against, and leave the answer alone while the user scrolls.
+   */
+  function measureHeaderCollapsible(panel, body){
+    if (!panel || !body) {
+      state.headerCanCollapse = false;
+      return;
+    }
+
+    var collapsible = measuredHeaderCopyHeight(panel) + measuredStatusHeight(panel) + 13;
+    var overflowIfExpanded = (body.scrollHeight - body.clientHeight) + (collapsible * state.headerProgress);
+
+    state.headerCanCollapse = overflowIfExpanded > (collapsible + 24);
+  }
+
   function updateCompactHeader(panel, scrollTop){
     if (!panel) return;
-    var body = panel.querySelector('#helix-body');
-    var maxScroll = body ? Math.max(0, body.scrollHeight - body.clientHeight) : 0;
-    var collapseDistance = Math.max(72, Math.min(120, maxScroll || 120));
-    state.headerTargetProgress = maxScroll <= 2 ? 0 : clamp(Number(scrollTop || 0) / collapseDistance, 0, 1);
+    if (!state.headerCanCollapse) {
+      state.headerTargetProgress = 0;
+      animateHeader(panel);
+      return;
+    }
+    var target = clamp(Number(scrollTop || 0) / HEADER_COLLAPSE_DISTANCE_PX, 0, 1);
+
+    // Ignore hair-thin changes, so a scrollTop the browser clamps by a pixel or two
+    // when the collapse removes the overflow cannot start a new cycle.
+    if (target !== 0 && target !== 1 && Math.abs(target - state.headerTargetProgress) < HEADER_TARGET_DEADBAND) {
+      return;
+    }
+
+    state.headerTargetProgress = target;
     animateHeader(panel);
   }
 
@@ -2358,12 +2717,28 @@ LIMIT 8
       state.headerFrame = null;
       if (!panel || (panel.isConnected === false)) return;
       var target = state.headerTargetProgress;
-      var next = state.headerProgress + ((target - state.headerProgress) * 0.2);
+      var next = state.headerProgress + ((target - state.headerProgress) * 0.28);
       if (Math.abs(target - next) < 0.002) next = target;
       applyHeaderProgress(panel, next);
       if (next !== target) state.headerFrame = nextFrame(tick);
     };
     state.headerFrame = nextFrame(tick);
+  }
+
+  function measuredHeaderCopyHeight(panel){
+    if (state.headerCopyHeight > 0) return state.headerCopyHeight;
+    var el = panel.querySelector('.helix-header-copy');
+    var h = el ? el.scrollHeight : 0;
+    if (h > 0) state.headerCopyHeight = h;
+    return h || 96;
+  }
+
+  function measuredStatusHeight(panel){
+    if (state.statusHeight > 0) return state.statusHeight;
+    var el = panel.querySelector('.helix-page-status');
+    var h = el ? el.scrollHeight : 0;
+    if (h > 0) state.statusHeight = h;
+    return h || 40;
   }
 
   function applyHeaderProgress(panel, value){
@@ -2382,10 +2757,10 @@ LIMIT 8
     setPanelVar(panel, '--helix-brand-label-size', px(9 + (3 * progress)));
     setPanelVar(panel, '--helix-brand-name-size', px(16 + (4 * progress)));
     setPanelVar(panel, '--helix-header-copy-opacity', String(clamp(1 - (progress * 1.15), 0, 1)));
-    setPanelVar(panel, '--helix-header-copy-height', px(220 * (1 - progress)));
+    setPanelVar(panel, '--helix-header-copy-height', px(measuredHeaderCopyHeight(panel) * (1 - progress)));
     setPanelVar(panel, '--helix-header-copy-y', px(-12 * progress));
     setPanelVar(panel, '--helix-status-opacity', String(clamp(1 - (progress * 1.2), 0, 1)));
-    setPanelVar(panel, '--helix-status-height', px(56 * (1 - progress)));
+    setPanelVar(panel, '--helix-status-height', px(measuredStatusHeight(panel) * (1 - progress)));
     setPanelVar(panel, '--helix-status-padding', px(10 * (1 - progress)) + ' 14px');
     setPanelVar(panel, '--helix-status-y', px(-12 * progress));
   }
@@ -2601,13 +2976,147 @@ LIMIT 8
     var pageCtx = state.pageContext || getPageContext();
     var formCtx = collectFormContext();
     state.formContext = formCtx;
+    var payload = JSON.stringify({ publicKey: publicKey, message: msg, conversationId: state.conversationId, visitorId: visitorId, visitorEmail: visitorEmail, history: history, pageContext: pageCtx, formContext: formCtx });
+
+    if (window.fetch && window.ReadableStream && window.TextDecoder) sendStreaming(payload);
+    else sendBuffered(payload);
+  }
+
+  /** The assistant message currently being streamed into, if any. */
+  function streamingMessage(){
+    for (var i = state.messages.length - 1; i >= 0; i--) {
+      if (state.messages[i] && state.messages[i].streaming) return state.messages[i];
+    }
+    return null;
+  }
+
+  /**
+   * Consume the SSE endpoint so the answer appears as it is generated. Falls back to
+   * the buffered endpoint only when the server never accepted the turn, so a message
+   * can never be sent (and recorded) twice.
+   */
+  function sendStreaming(payload){
+    var accepted = false;   // server has taken the turn; retrying would duplicate it
+    var settled = false;
+    var agentAction = null;
+    var errorText = '';
+    var streamed = '';
+    var bubble = null;
+    var paintFrame = null;
+
+    function paint(){
+      paintFrame = null;
+      var node = root.querySelector('#helix-stream-msg');
+      if (!node) { render(); return; }
+      node.innerHTML = renderMessageHtml(streamed);
+      var body = root.querySelector('#helix-body');
+      if (body && state.bodyAtBottom) body.scrollTop = body.scrollHeight;
+    }
+
+    // Markdown is re-parsed on paint, so coalesce bursts of tokens into one frame.
+    function schedulePaint(){
+      if (paintFrame) return;
+      paintFrame = window.requestAnimationFrame ? window.requestAnimationFrame(paint) : setTimeout(paint, 16);
+    }
+
+    function finish(){
+      if (settled) return;
+      settled = true;
+      if (paintFrame && window.cancelAnimationFrame) window.cancelAnimationFrame(paintFrame);
+      paintFrame = null;
+      state.sending = false;
+      var actionResult = agentAction ? applyAgentAction(agentAction) : null;
+      var finalText = (actionResult && actionResult.message) ? actionResult.message : streamed;
+      if (!finalText) finalText = errorText || 'Sorry, something went wrong.';
+      if (bubble) { bubble.content = finalText; delete bubble.streaming; }
+      else state.messages.push({ role: 'assistant', content: finalText });
+      persistSession();
+      render();
+    }
+
+    function onFrame(frame){
+      var lines = frame.split('\n');
+      var event = 'message';
+      var data = '';
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        if (line.indexOf('event:') === 0) event = line.slice(6).trim();
+        else if (line.indexOf('data:') === 0) data += line.slice(5).trim();
+      }
+      if (!data) return;
+      var parsed;
+      try { parsed = JSON.parse(data); } catch (e) { return; }
+
+      if (event === 'meta') {
+        accepted = true;
+        if (parsed.conversationId) state.conversationId = parsed.conversationId;
+        agentAction = parsed.agentAction || null;
+        return;
+      }
+      if (event === 'delta') {
+        accepted = true;
+        streamed += parsed.text || '';
+        // A form-agent turn resolves to a scripted reply on `done`; showing the raw
+        // text first would make it flicker, so buffer it instead.
+        if (agentAction) return;
+        if (!bubble) {
+          bubble = { role: 'assistant', content: '', streaming: true };
+          state.messages.push(bubble);
+          render();
+        }
+        bubble.content = streamed;
+        schedulePaint();
+        return;
+      }
+      if (event === 'error') { errorText = parsed.message || ''; return; }
+      if (event === 'done') { finish(); }
+    }
+
+    fetch(ORIGIN + '/api/public/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=UTF-8', 'Accept': 'text/event-stream' },
+      body: payload
+    }).then(function(r){
+      if (!r.ok || !r.body) {
+        // An old backend without the stream route: retry on the buffered one.
+        if (r.status === 404 || r.status === 405) { sendBuffered(payload); settled = true; return; }
+        return r.json().catch(function(){ return {}; }).then(function(j){
+          errorText = j.error || j.message || '';
+          finish();
+        });
+      }
+      var reader = r.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = '';
+      function pump(){
+        return reader.read().then(function(res){
+          if (res.done) { finish(); return; }
+          buffer += decoder.decode(res.value, { stream: true });
+          var frames = buffer.split('\n\n');
+          buffer = frames.pop();
+          for (var i = 0; i < frames.length; i++) onFrame(frames[i]);
+          if (settled) { try { reader.cancel(); } catch (e) {} return; }
+          return pump();
+        });
+      }
+      return pump();
+    }).catch(function(){
+      if (settled) return;
+      if (!accepted) { sendBuffered(payload); settled = true; return; }
+      errorText = errorText || 'Network error. Please try again.';
+      finish();
+    });
+  }
+
+  /** Original single-response path, kept for browsers and backends without streaming. */
+  function sendBuffered(payload){
     fetch(ORIGIN + '/api/public/chat', {
       method: 'POST',
       headers: {
         'Content-Type': 'text/plain;charset=UTF-8',
         'Accept': 'application/json'
       },
-      body: JSON.stringify({ publicKey: publicKey, message: msg, conversationId: state.conversationId, visitorId: visitorId, visitorEmail: visitorEmail, history: history, pageContext: pageCtx, formContext: formCtx })
+      body: payload
     }).then(function(r){return r.json().then(function(j){return {ok:r.ok,j:j};});}).then(function(res){
       state.sending = false;
       if (!res.ok) { state.messages.push({ role:'assistant', content: res.j.error || res.j.message || 'Sorry, something went wrong.' }); }
@@ -2708,6 +3217,38 @@ LIMIT 8
     return { url: url, label: String(cta.label || '').trim() || 'Visit website' };
   }
 
+  var BODY_BOTTOM_SLACK_PX = 48;
+
+  function rememberBodyScroll(body){
+    if (!body) return;
+    state.bodyScrollTop = body.scrollTop;
+    state.bodyAtBottom = (body.scrollHeight - body.scrollTop - body.clientHeight) <= BODY_BOTTOM_SLACK_PX;
+  }
+
+  /**
+   * render() rebuilds the panel, so the message list would otherwise snap to the bottom on
+   * every state change. Stick to the bottom only when the reader was already there.
+   */
+  function restoreBodyScroll(body, firstPaint){
+    if (!body) return;
+    var stickToBottom = state.bodyAtBottom || firstPaint;
+    // Opening the panel and restoring a position must land instantly; only a new
+    // message arriving while the reader sits at the bottom is worth animating.
+    var instant = firstPaint || !stickToBottom;
+    var previous = body.style.scrollBehavior;
+
+    if (instant) body.style.scrollBehavior = 'auto';
+
+    if (stickToBottom) {
+      body.scrollTop = body.scrollHeight;
+    } else {
+      body.scrollTop = Math.min(state.bodyScrollTop, Math.max(0, body.scrollHeight - body.clientHeight));
+    }
+
+    if (instant) body.style.scrollBehavior = previous || '';
+    rememberBodyScroll(body);
+  }
+
   function suggestedFaqs(){
     var list = (state.bot && state.bot.faqs) || [];
     if (!list.length) return [];
@@ -2789,6 +3330,7 @@ LIMIT 8
         '</div></div>' +
         footerMarkup +
       '</div>';
+    var firstPaint = !state.panelAnimatedIn;
     root.appendChild(panel);
     if (!state.closing && !state.panelAnimatedIn) {
       state.panelAnimatedIn = true;
@@ -2838,6 +3380,9 @@ LIMIT 8
     state.messages.forEach(function(m){
       var div = document.createElement('div');
       div.className = 'helix-msg ' + (m.role === 'user' ? 'user' : 'bot');
+      // Tagged so incoming tokens can be painted straight into this node instead of
+      // re-rendering the whole panel on every delta.
+      if (m.streaming) div.id = 'helix-stream-msg';
       if (m.role === 'user') div.style.background = theme.userGradient;
       if (m.role === 'user') div.style.color = theme.primaryText;
       if (m.role === 'user') div.textContent = m.content;
@@ -2873,17 +3418,24 @@ LIMIT 8
       });
       body.appendChild(faqWrap);
     }
-    if (state.sending) {
+    // Once tokens start landing the answer itself replaces the typing dots.
+    if (state.sending && !streamingMessage()) {
       var t = document.createElement('div');
       t.className = 'helix-msg bot helix-typing-wrapper';
       t.innerHTML = '<div class="helix-typing"><span></span><span></span><span></span></div>';
       t.style.padding = '0';
       body.appendChild(t);
     }
-    body.scrollTop = body.scrollHeight;
-    body.onscroll = function(){ updateCompactHeader(panel, body.scrollTop); };
+    restoreBodyScroll(body, firstPaint);
+    measureHeaderCollapsible(panel, body);
+    body.onscroll = function(){
+      rememberBodyScroll(body);
+      updateCompactHeader(panel, body.scrollTop);
+    };
     cancelFrame(state.headerFrame);
     state.headerFrame = null;
+    state.headerCopyHeight = 0;
+    state.statusHeight = 0;
     // Match the new panel to the current scroll position before easing takes over.
     state.headerTargetProgress = state.headerProgress;
     applyHeaderProgress(panel, state.headerProgress);

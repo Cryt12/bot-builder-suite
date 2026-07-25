@@ -6,6 +6,10 @@ After=network.target
 Type=simple
 User=talinoserver2
 WorkingDirectory=/home/talinoserver2/Documents/bot-builder-suite/laravel-backend
+# The PHP dev server is single-process by default, so one in-flight chat turn blocks
+# every other request. Streaming holds a connection open for the whole generation,
+# which makes that far more visible -- give it real workers.
+Environment=PHP_CLI_SERVER_WORKERS=8
 ExecStart=/usr/bin/php artisan serve --host=127.0.0.1 --port=8082
 Restart=always
 RestartSec=10
