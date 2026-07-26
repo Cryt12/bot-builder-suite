@@ -3,7 +3,10 @@ import { useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/lib/auth-context";
 import { AppLogo } from "@/components/app-logo";
-import { ArrowRight, Code2, Database, Loader2, MessageSquare, Shield, Sparkles, Upload, Zap } from "lucide-react";
+import { HelixBackdrop } from "@/components/helix-backdrop";
+import { FeatureSlideshow } from "@/components/feature-slideshow";
+import { onScrollFrame } from "@/lib/scroll-driver";
+import { ArrowRight, Loader2, Upload } from "lucide-react";
 
 export const Route = createFileRoute("/")({
   component: Landing,
@@ -62,13 +65,18 @@ function Landing() {
     const parallax = parallaxRef.current;
     if (!parallax) return;
 
-    const updateParallax = () => {
-      parallax.style.transform = `translate3d(0, ${window.scrollY * 0.08}px, 0)`;
-    };
-
-    updateParallax();
-    window.addEventListener("scroll", updateParallax, { passive: true });
-    return () => window.removeEventListener("scroll", updateParallax);
+    // Wrapped at the 72px grid pitch so a composited transform can run forever
+    // without the layer ever sliding out from under the viewport.
+    let shown = -1;
+    const unsubscribe = onScrollFrame(({ scroll }) => {
+      const offset = Math.round(((scroll * 0.09) % 72) * 100) / 100;
+      if (offset !== shown) {
+        shown = offset;
+        parallax.style.transform = `translate3d(0, ${offset}px, 0)`;
+      }
+      return false;
+    });
+    return unsubscribe;
   }, [loading, user]);
 
   if (loading || user) {
@@ -79,9 +87,12 @@ function Landing() {
     );
   }
 
+  // overflow-x-clip (not hidden) so the page never becomes a scroll container —
+  // that would break `position: sticky` for the header and the pinned feature stage.
   return (
-    <div className="relative min-h-screen overflow-hidden bg-background bg-gradient-hero">
+    <div className="relative min-h-screen overflow-x-clip bg-background bg-gradient-hero">
       <div ref={parallaxRef} className="landing-parallax" aria-hidden="true" />
+      <HelixBackdrop />
       {/* Nav */}
       <header className="sticky top-0 z-40 border-b border-border/50 backdrop-blur-xl bg-background/60">
         <div className="mx-auto max-w-7xl px-6 h-16 flex items-center justify-between">
@@ -174,37 +185,7 @@ function Landing() {
       </section>
 
       {/* Features */}
-      <section id="features" className="scroll-mt-24 mx-auto max-w-7xl px-6 py-24">
-        <div className="reveal text-center max-w-2xl mx-auto">
-          <h2 className="font-display text-4xl font-bold">Everything you need to launch.</h2>
-          <p className="mt-4 text-muted-foreground">
-            From ingestion to embedding to analytics — Helix handles the entire RAG pipeline.
-          </p>
-        </div>
-
-        <div className="mt-16 grid md:grid-cols-3 gap-6">
-          {[
-            { icon: Upload, title: "Multi-source ingestion", desc: "PDF, DOCX, TXT files, raw text, or any public URL. We chunk and embed automatically." },
-            { icon: Database, title: "Vector search", desc: "Semantic search via Postgres + pgvector. Fast, accurate, and yours to own." },
-            { icon: MessageSquare, title: "Embeddable widget", desc: "One <script> tag. Lives on your site, talks to your backend, looks like your brand." },
-            { icon: Code2, title: "API-first", desc: "Every bot gets a unique API key. Build custom integrations beyond the widget." },
-            { icon: Shield, title: "Per-tenant isolation", desc: "Row-level security on every table. Your knowledge never bleeds into another bot." },
-            { icon: Zap, title: "Usage analytics", desc: "Track chats, top queries, and conversation history from a single dashboard." },
-          ].map((f, i) => (
-            <div
-              key={f.title}
-              className="reveal rounded-xl border border-border bg-gradient-card p-6 hover:border-border-strong hover:-translate-y-1 transition-all duration-300"
-              style={{ transitionDelay: `${i * 60}ms` }}
-            >
-              <div className="h-10 w-10 rounded-lg bg-accent flex items-center justify-center mb-4">
-                <f.icon className="h-5 w-5 text-primary" />
-              </div>
-              <h3 className="font-semibold mb-2">{f.title}</h3>
-              <p className="text-sm text-muted-foreground leading-relaxed">{f.desc}</p>
-            </div>
-          ))}
-        </div>
-      </section>
+      <FeatureSlideshow />
 
       {/* How it works */}
       <section id="how" className="scroll-mt-24 mx-auto max-w-7xl px-6 py-24 border-t border-border">
