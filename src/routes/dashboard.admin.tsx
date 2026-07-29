@@ -4,6 +4,7 @@ import { listAdminUsers } from "@/lib/bots-api";
 import { useAuth } from "@/lib/auth-context";
 import { Badge } from "@/components/ui/badge";
 import { Bot, Shield, Users } from "lucide-react";
+import { AdminModelRouting } from "@/components/admin-model-routing";
 
 type AdminUsersResponse = Awaited<ReturnType<typeof listAdminUsers>>;
 
@@ -45,6 +46,8 @@ function AdminPage() {
           View every account in the workspace and the bots attached to each user.
         </p>
       </header>
+
+      <AdminModelRouting />
 
       <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
         <SummaryCard icon={<Users className="h-5 w-5 text-primary" />} label="Users" value={loading ? "..." : String(data?.summary.users ?? 0)} />

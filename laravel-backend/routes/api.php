@@ -31,6 +31,8 @@ Route::middleware(BearerTokenAuth::class)->group(function () {
     Route::get('/auth/me', [AuthController::class, 'me']);
     Route::post('/auth/logout', [AuthController::class, 'logout']);
     Route::get('/admin/users', [AdminController::class, 'users']);
+    Route::get('/admin/llm-routing', [AdminController::class, 'llmRouting']);
+    Route::put('/admin/llm-routing', [AdminController::class, 'updateLlmRouting']);
     Route::get('/analytics', [ChatbotController::class, 'dashboardAnalytics']);
     Route::get('/chatbots', [ChatbotController::class, 'index']);
     Route::post('/chatbots', [ChatbotController::class, 'store']);

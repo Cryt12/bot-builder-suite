@@ -4,7 +4,9 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\AnalyticsEvent;
+use App\Models\AppSetting;
 use App\Models\Chatbot;
+use App\Exceptions\LlmException;
 use App\Models\Conversation;
 use App\Models\DocumentChunk;
 use App\Models\KnowledgeSource;
@@ -15,6 +17,7 @@ use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -1617,13 +1620,88 @@ LIMIT 8
      */
     private function generateReply(string $system, array $messages, Chatbot $bot): string
     {
-        $provider = $bot->llm_provider ?: config('models.llm.default_provider');
-        $model    = $bot->llm_model ?: config("models.llm.{$provider}.model");
-
-        return match ($provider) {
+        return $this->viaProviders($bot, fn (string $provider, string $model) => match ($provider) {
             'openrouter' => $this->generateOpenRouter($model, $system, $messages),
             default      => $this->generateOllama($model, $system, $messages),
-        };
+        });
+    }
+
+    /**
+     * Models to try in order: the bot's own pin (or the workspace primary),
+     * then the workspace backup. Entries whose provider is unusable -- an
+     * OpenRouter model with no API key, say -- are dropped rather than attempted.
+     *
+     * @return array<int, array{key: string, provider: string, model: string, label: string, note: string}>
+     */
+    private function providerChain(Chatbot $bot): array
+    {
+        $primary = $bot->llm_provider
+            ? [
+                'key' => 'bot:' . $bot->id,
+                'provider' => $bot->llm_provider,
+                'model' => $bot->llm_model ?: (string) config("models.llm.{$bot->llm_provider}.model"),
+                'label' => 'Bot override',
+                'note' => '',
+            ]
+            : AppSetting::llmPrimaryEntry();
+
+        $chain = [$primary];
+        $secondary = AppSetting::llmSecondaryEntry();
+
+        // Same provider with a different model is a legitimate backup, so entries
+        // are compared on model, not provider.
+        if ($secondary && $secondary['model'] !== $primary['model']) {
+            $chain[] = $secondary;
+        }
+
+        $usable = array_values(array_filter($chain, fn (array $e) => $this->providerConfigured($e['provider'])));
+
+        // Never hand back an empty chain; a misconfigured backup should not stop
+        // us from at least attempting what the bot actually asked for.
+        return $usable !== [] ? $usable : [$primary];
+    }
+
+    private function providerConfigured(string $provider): bool
+    {
+        if ($provider === 'openrouter') {
+            return (bool) (config('models.llm.openrouter.api_key') ?: config('services.openrouter.api_key'));
+        }
+
+        return true;
+    }
+
+    /**
+     * Run $call against each provider in turn until one succeeds.
+     *
+     * $canFailOver lets the streaming path veto a retry once the visitor has
+     * already seen tokens: restarting there would replay a half-written answer.
+     */
+    private function viaProviders(Chatbot $bot, callable $call, ?callable $canFailOver = null): mixed
+    {
+        $chain = $this->providerChain($bot);
+        $lastKey = array_key_last($chain);
+
+        foreach ($chain as $i => $entry) {
+            try {
+                return $call($entry['provider'], $entry['model']);
+            } catch (\Throwable $e) {
+                $retryable = ! ($e instanceof LlmException) || $e->retryable();
+
+                if ($i === $lastKey || ! $retryable || ($canFailOver && ! $canFailOver())) {
+                    throw $e;
+                }
+
+                Log::warning('LLM provider failed; falling back.', [
+                    'chatbot_id' => $bot->id,
+                    'failed' => $entry['provider'] . ':' . $entry['model'],
+                    'next' => $chain[$i + 1]['provider'] . ':' . $chain[$i + 1]['model'],
+                    'status' => $e instanceof LlmException ? $e->status : null,
+                    'error' => Str::limit($e->getMessage(), 300),
+                ]);
+            }
+        }
+
+        throw new \RuntimeException('No LLM provider was able to answer.');
     }
 
     /**
@@ -1641,7 +1719,7 @@ LIMIT 8
         ]);
 
         if (! $response->ok()) {
-            throw new \RuntimeException('Ollama failed: ' . $response->body());
+            throw new LlmException('ollama', $response->status(), 'Ollama failed: ' . $response->body());
         }
 
         return $response->json('message.content') ?: 'Sorry, I had trouble responding.';
@@ -1653,13 +1731,25 @@ LIMIT 8
      */
     private function streamReply(string $system, array $messages, Chatbot $bot, callable $onDelta): void
     {
-        $provider = $bot->llm_provider ?: config('models.llm.default_provider');
-        $model    = $bot->llm_model ?: config("models.llm.{$provider}.model");
-
-        match ($provider) {
-            'openrouter' => $this->streamOpenRouter($model, $system, $messages, $onDelta),
-            default      => $this->streamOllama($model, $system, $messages, $onDelta),
+        $emitted = false;
+        $guarded = function (string $delta) use ($onDelta, &$emitted): void {
+            $emitted = true;
+            $onDelta($delta);
         };
+
+        $this->viaProviders(
+            $bot,
+            function (string $provider, string $model) use ($system, $messages, $guarded): null {
+                match ($provider) {
+                    'openrouter' => $this->streamOpenRouter($model, $system, $messages, $guarded),
+                    default      => $this->streamOllama($model, $system, $messages, $guarded),
+                };
+
+                return null;
+            },
+            // Only swap providers while the reply is still empty.
+            fn (): bool => ! $emitted,
+        );
     }
 
     /**
@@ -1677,7 +1767,7 @@ LIMIT 8
         ]);
 
         if (! $response->ok()) {
-            throw new \RuntimeException('Ollama failed: ' . $response->body());
+            throw new LlmException('ollama', $response->status(), 'Ollama failed: ' . $response->body());
         }
 
         $this->readLines($response, function (string $line) use ($onDelta): bool {
@@ -1705,7 +1795,7 @@ LIMIT 8
         $apiKey = config('models.llm.openrouter.api_key') ?: config('services.openrouter.api_key');
 
         if (! $apiKey) {
-            throw new \RuntimeException('OpenRouter API key is not configured.');
+            throw new LlmException('openrouter', 401, 'OpenRouter API key is not configured.');
         }
 
         $url = rtrim(config('models.llm.openrouter.url'), '/') . '/chat/completions';
@@ -1724,7 +1814,7 @@ LIMIT 8
             ]);
 
         if (! $response->ok()) {
-            throw new \RuntimeException('OpenRouter failed: ' . $response->body());
+            throw new LlmException('openrouter', $response->status(), 'OpenRouter failed: ' . $response->body());
         }
 
         $this->readLines($response, function (string $line) use ($onDelta): bool {
@@ -1807,7 +1897,7 @@ LIMIT 8
         $apiKey = config('models.llm.openrouter.api_key') ?: config('services.openrouter.api_key');
 
         if (! $apiKey) {
-            throw new \RuntimeException('OpenRouter API key is not configured.');
+            throw new LlmException('openrouter', 401, 'OpenRouter API key is not configured.');
         }
 
         $url = rtrim(config('models.llm.openrouter.url'), '/') . '/chat/completions';
@@ -1825,7 +1915,7 @@ LIMIT 8
             ]);
 
         if (! $response->ok()) {
-            throw new \RuntimeException('OpenRouter failed: ' . $response->body());
+            throw new LlmException('openrouter', $response->status(), 'OpenRouter failed: ' . $response->body());
         }
 
         return $response->json('choices.0.message.content') ?: 'Sorry, I had trouble responding.';

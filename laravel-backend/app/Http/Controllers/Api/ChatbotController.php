@@ -511,8 +511,18 @@ class ChatbotController extends Controller
         $storagePath = $file->storeAs("knowledge/{$chatbot->user_id}/{$chatbot->id}", $storedName);
         $absolutePath = Storage::path($storagePath);
 
-        // JSON is split record-by-record so a chunk never straddles two records.
-        $segments = $extension === 'json' ? $this->jsonSegments($absolutePath) : null;
+        // A clean JSON file — a root array of objects — maps one object to one chunk.
+        // Anything else falls back to record-by-record flattening, which still keeps a
+        // chunk from straddling two records but may pack several small ones together.
+        $segments = null;
+        $segmentPerChunk = false;
+
+        if ($extension === 'json') {
+            $segments = $this->jsonRecordSegments($absolutePath);
+            $segmentPerChunk = $segments !== null;
+            $segments ??= $this->jsonSegments($absolutePath);
+        }
+
         $text = $segments !== null
             ? implode("\n\n", $segments)
             : $this->extractFileText($absolutePath, $extension);
@@ -527,6 +537,7 @@ class ChatbotController extends Controller
             $storagePath,
             $file->getSize(),
             $segments,
+            $segmentPerChunk,
         ));
     }
 
@@ -730,6 +741,8 @@ class ChatbotController extends Controller
         ?string $storagePath = null,
         ?int $sizeBytes = null,
         ?array $segments = null,
+        /** Map each segment to its own chunk instead of packing several per chunk. */
+        bool $segmentPerChunk = false,
     ): array
     {
         $name = $this->sanitizeUtf8($name);
@@ -749,7 +762,11 @@ class ChatbotController extends Controller
         ]);
 
         try {
-            $chunks = $segments !== null ? $this->chunkSegments($segments) : $this->chunkText($text);
+            $chunks = match (true) {
+                $segments !== null && $segmentPerChunk => $this->chunkRecords($segments),
+                $segments !== null => $this->chunkSegments($segments),
+                default => $this->chunkText($text),
+            };
             abort_if(count($chunks) === 0, 422, 'No extractable text found.');
 
             $now = now();
@@ -792,12 +809,12 @@ class ChatbotController extends Controller
         }
     }
 
-    private function chunkText(string $text): array
+    private function chunkText(string $text, int $size = 1000, int $overlap = 150): array
     {
         $clean = $this->normalizeImportedText($text);
         $chunks = [];
-        $size = 1000;
-        $overlap = 150;
+        $size = max(100, $size);
+        $overlap = max(0, min($overlap, (int) ($size / 2)));
         $offset = 0;
 
         while ($offset < strlen($clean)) {
@@ -825,6 +842,65 @@ class ChatbotController extends Controller
         }
 
         return $chunks;
+    }
+
+    /**
+     * One chunk per record, in file order — chunk 1 is the first object in the JSON,
+     * chunk 2 the second. Unlike chunkSegments() this never merges two records into
+     * one chunk, so a record's boundaries survive into retrieval exactly as authored.
+     *
+     * The single exception is a record longer than the embedder's input cap: past
+     * that limit the tail is truncated before it ever reaches a vector, so an
+     * oversized record is split into labelled parts rather than silently losing its
+     * ending from semantic search.
+     */
+    private function chunkRecords(array $segments): array
+    {
+        $limit = max(500, (int) config('models.embeddings.max_input_chars', 4000));
+        $chunks = [];
+
+        foreach ($segments as $segment) {
+            $segment = trim($this->sanitizeUtf8(is_string($segment) ? $segment : (string) json_encode($segment)));
+
+            if (strlen($segment) <= 20) {
+                continue;
+            }
+
+            if (strlen($segment) <= $limit) {
+                $chunks[] = $segment;
+
+                continue;
+            }
+
+            // Split at the embedder's cap rather than the much smaller prose window:
+            // the goal is the fewest pieces that still embed in full, not small ones.
+            $header = $this->recordHeaderLine($segment);
+            $body = $header !== '' ? ltrim(substr($segment, strlen($header))) : $segment;
+            // The label is prepended after splitting, so leave room for it — otherwise
+            // each part would land just over the cap and lose its tail to truncation.
+            $parts = $this->chunkText($body, $limit - strlen($header) - 24, 200);
+            $total = count($parts);
+
+            foreach ($parts as $position => $part) {
+                $label = $header !== ''
+                    ? sprintf('%s (part %d of %d)]', rtrim($header, ']'), $position + 1, $total)
+                    : sprintf('[part %d of %d]', $position + 1, $total);
+
+                $chunks[] = $label . "\n" . $part;
+            }
+        }
+
+        return $chunks;
+    }
+
+    /**
+     * The bracketed header jsonRecordSegments() puts on the first line, if present.
+     */
+    private function recordHeaderLine(string $segment): string
+    {
+        $first = strtok($segment, "\n");
+
+        return is_string($first) && preg_match('/^\[.+\]$/', trim($first)) ? trim($first) : '';
     }
 
     /**
@@ -872,9 +948,104 @@ class ChatbotController extends Controller
     }
 
     /**
-     * Turn a JSON (or JSON Lines) file into readable "key: value" records, one segment per record.
+     * One segment per top-level object, for "clean" JSON: a file whose root is an
+     * array of objects (or a single object). Each object becomes exactly one chunk,
+     * so chunk 1 is the first `{...}` in the file, chunk 2 the second, and so on.
+     *
+     * Returns null when the file is any other shape, which leaves those uploads on
+     * the general flattening path rather than guessing at a structure.
      */
-    private function jsonSegments(string $path): array
+    private function jsonRecordSegments(string $path): ?array
+    {
+        $decoded = $this->decodeJsonFile($path);
+
+        // A lone root object is a one-record file — but only when it is genuinely
+        // one record. An object that wraps nested record lists (say {"faqs": [...]})
+        // would collapse the whole file into a single chunk, so it keeps the general
+        // flattening path that splits those lists into their own segments.
+        if (is_array($decoded) && $decoded !== [] && ! array_is_list($decoded)) {
+            foreach ($decoded as $value) {
+                if ($this->isJsonRecordList($value)) {
+                    return null;
+                }
+            }
+
+            $decoded = [$decoded];
+        }
+
+        if (! is_array($decoded) || $decoded === [] || ! array_is_list($decoded)) {
+            return null;
+        }
+
+        foreach ($decoded as $record) {
+            // Every element must be an object; a list of scalars or of nested lists
+            // is not the shape this mode is for.
+            if (! is_array($record) || $record === [] || array_is_list($record)) {
+                return null;
+            }
+        }
+
+        $segments = [];
+
+        foreach ($decoded as $index => $record) {
+            if (count($segments) >= self::JSON_MAX_SEGMENTS) {
+                break;
+            }
+
+            $lines = [];
+            $this->flattenJsonValue($record, '', $lines);
+
+            if ($lines === []) {
+                continue;
+            }
+
+            $header = $this->jsonRecordHeader($record, $index);
+            $segments[] = trim(($header !== '' ? $header . "\n" : '') . implode("\n", $lines));
+        }
+
+        return $segments === [] ? null : $segments;
+    }
+
+    /**
+     * A self-describing header so a chunk still identifies its record once it is
+     * retrieved on its own. Both the identifier and the title are embedded and
+     * full-text indexed along with the body, so they are searchable too.
+     */
+    private function jsonRecordHeader(array $record, int $index): string
+    {
+        $parts = ['record ' . ($index + 1)];
+
+        $identifier = $this->firstJsonScalarMatching($record, '/(^|_)(id|no|num|number|code|key|slug|ref)$/i');
+        if ($identifier !== null) {
+            $parts[] = $identifier;
+        }
+
+        $title = $this->firstJsonScalarMatching($record, '/(title|name|subject|heading|label)/i');
+        if ($title !== null && $title !== $identifier) {
+            $parts[] = Str::limit($title, 120);
+        }
+
+        return '[' . implode(' | ', $parts) . ']';
+    }
+
+    private function firstJsonScalarMatching(array $record, string $pattern): ?string
+    {
+        foreach ($record as $key => $value) {
+            if ($value === null || is_array($value) || ! preg_match($pattern, (string) $key)) {
+                continue;
+            }
+
+            $text = trim($this->jsonScalarToString($value));
+
+            if ($text !== '') {
+                return $text;
+            }
+        }
+
+        return null;
+    }
+
+    private function decodeJsonFile(string $path): mixed
     {
         $raw = file_get_contents($path);
         abort_if($raw === false, 422, 'Could not read JSON file.');
@@ -888,6 +1059,16 @@ class ChatbotController extends Controller
             $decoded = $this->decodeJsonLines($raw);
             abort_if($decoded === null, 422, 'Invalid JSON file.');
         }
+
+        return $decoded;
+    }
+
+    /**
+     * Turn a JSON (or JSON Lines) file into readable "key: value" records, one segment per record.
+     */
+    private function jsonSegments(string $path): array
+    {
+        $decoded = $this->decodeJsonFile($path);
 
         $segments = [];
         $this->collectJsonSegments($decoded, '', $segments);

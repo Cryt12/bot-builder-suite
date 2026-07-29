@@ -15,6 +15,18 @@ return [
         'default_provider' => env('LLM_DEFAULT_PROVIDER', 'ollama'),
 
         /*
+        | Provider to retry on when the primary cannot answer. Set to '' to
+        | disable failover and let the error surface.
+        |
+        | Only transport faults, timeouts, 429 and 5xx trigger it: a 401 means the
+        | key is wrong and a 400 means we sent something invalid, and quietly
+        | switching providers on those would hide a broken setup indefinitely.
+        | While streaming, failover only happens before the first token reaches
+        | the visitor -- past that point a retry would replay a half-written reply.
+        */
+        'fallback_provider' => env('LLM_FALLBACK_PROVIDER', ''),
+
+        /*
         | Stream replies to the widget token-by-token. Total generation time is
         | unchanged, but the visitor sees the first words in well under a second
         | instead of staring at a spinner until the whole answer is finished.
@@ -37,6 +49,35 @@ return [
             'api_key' => env('OPENROUTER_API_KEY'),
             'url' => env('OPENROUTER_URL', 'https://openrouter.ai/api/v1'),
             'model' => env('OPENROUTER_MODEL', 'google/gemma-4:mini'),
+        ],
+
+        /*
+        | Models an admin can route between from the dashboard.
+        |
+        | Keys are stored in app_settings, so renaming one orphans a saved choice
+        | -- add and remove entries rather than renaming. Several entries may
+        | share a provider: a provider is how a model is reached, not the choice
+        | itself, which is why routing is stored per model.
+        */
+        'catalog' => [
+            'deepseek-v4-flash' => [
+                'provider' => 'openrouter',
+                'model' => 'deepseek/deepseek-v4-flash',
+                'label' => 'DeepSeek V4 Flash',
+                'note' => 'Hosted · reasoning model, 1M context',
+            ],
+            'gpt-oss-120b' => [
+                'provider' => 'openrouter',
+                'model' => 'openai/gpt-oss-120b',
+                'label' => 'GPT-OSS 120B',
+                'note' => 'Hosted · open-weight MoE, 131K context',
+            ],
+            'gemma4-local' => [
+                'provider' => 'ollama',
+                'model' => 'gemma4:e4b',
+                'label' => 'Gemma 4',
+                'note' => 'Runs locally on this server · no per-token cost',
+            ],
         ],
     ],
 

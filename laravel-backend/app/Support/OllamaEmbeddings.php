@@ -121,14 +121,19 @@ class OllamaEmbeddings
 
     /**
      * Identifies how a stored vector was produced. Vectors are only comparable when
-     * they came from the same model and the same document prefix, so chunks tagged
-     * with a stale recipe are the ones `knowledge:embed --all` needs to rebuild.
+     * they came from the same model and the same pair of task prefixes, so chunks
+     * tagged with a stale recipe are the ones `knowledge:embed --all` rebuilds.
+     *
+     * Both prefixes are hashed, not just the document one: the recipe also keys the
+     * query-embedding cache, so a change to the query prefix has to invalidate it
+     * too or stale query vectors would be compared against freshly built passages.
      */
     public static function recipe(): string
     {
         $model = (string) config('models.embeddings.ollama.model');
+        $prefixes = self::prefix(self::TASK_DOCUMENT) . "\0" . self::prefix(self::TASK_QUERY);
 
-        return $model . '/' . substr(sha1(self::prefix(self::TASK_DOCUMENT)), 0, 8);
+        return $model . '/' . substr(sha1($prefixes), 0, 8);
     }
 
     public static function toPgVector(array $embedding): string

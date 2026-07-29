@@ -230,3 +230,32 @@ export async function listAdminUsers() {
     }>;
   }>("/admin/users", { token: token() });
 }
+
+export type LlmProviderOption = {
+  /** Catalog key, e.g. "gpt-oss-120b". */
+  value: string;
+  label: string;
+  model: string;
+  provider: string;
+  ready: boolean;
+  note: string;
+};
+
+export type LlmRouting = {
+  options: LlmProviderOption[];
+  primary: string;
+  /** Empty string means failover is turned off. */
+  secondary: string;
+};
+
+export async function getLlmRouting() {
+  return laravelRequest<LlmRouting>("/admin/llm-routing", { token: token() });
+}
+
+export async function updateLlmRouting(primary: string, secondary: string) {
+  return laravelRequest<{ primary: string; secondary: string }>("/admin/llm-routing", {
+    method: "PUT",
+    token: token(),
+    body: JSON.stringify({ primary, secondary }),
+  });
+}
